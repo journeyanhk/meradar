@@ -30,7 +30,9 @@
       "marketCapUsd": 500000,
       "minLiquidityUsd": 50000,
       "copycatCount": 3,
-      "momentumMinNewBuyers30m": 10
+      "momentumMinNewBuyers30m": 10,
+      "momentumMinNetInUsd": 2000,
+      "momentumMinNetInDepthPct": 0.005
     },
     "narrativeMultiplier": 0.5
   },
