@@ -92,7 +92,18 @@ async function onTrade(t) {
     if (!cand) return;
   }
 
-  if (cand.status !== 'seen') return;
+  if (cand.status !== 'seen') {
+    // 归档币再现买入 → 复活为 active。它曾通过准入（报价币/元数据/安全打分已就绪），
+    // 无需重跑 promote；直接恢复轮询，避免清洗/竞态误归档后永久冻结在 0。
+    if (cand.status === 'archived') {
+      store.setStatus(key, 'active', null);
+      recordCurveTrade(t, store.get(key));
+      if (cand.pool) bus.emit(Events.POOLS_CHANGED, { chain: t.chain }); // 重建成交订阅
+      bus.emit(Events.UPDATE, { ...store.get(key) });
+      log.info({ chain: t.chain, symbol: cand.symbol }, '归档币再现买入，复活为 active');
+    }
+    return;
+  }
 
   if (momentum.buyerCount(t.address) < (config.admission.minBuyersToActivate || 5)) return;
 

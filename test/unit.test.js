@@ -140,6 +140,18 @@ test('curveMetrics 未知报价币：不定价(0)但仍计买家', () => {
   assert.equal(m.uniqueBuyers, 1);
 });
 
+// lastTradeTs：归档改为「基于活动」的根据——买/卖都刷新，取最新
+test('momentum.lastTradeTs：买/卖都刷新为最新成交时间', () => {
+  const token = '0x00000000000000000000000000000000000000d4';
+  assert.equal(momentum.lastTradeTs(token), 0); // 无记录
+  momentum.onTrade({ token, account: '0xb', isBuy: true, ts: 1000 });
+  assert.equal(momentum.lastTradeTs(token), 1000);
+  momentum.onTrade({ token, account: null, isBuy: false, ts: 5000 }); // 卖出也算活跃
+  assert.equal(momentum.lastTradeTs(token), 5000);
+  momentum.onTrade({ token, account: '0xc', isBuy: true, ts: 3000 }); // 乱序旧成交不回退
+  assert.equal(momentum.lastTradeTs(token), 5000);
+});
+
 // —— 4. normalizeSwap：D3-A′ 核心买卖方向判定，V2/V3 × 买/卖 × token0/token1 排序 ——
 const E = (n) => BigInt(n) * 10n ** 18n; // human -> wei(18)
 function pool(poolType, quoteIsToken0) {

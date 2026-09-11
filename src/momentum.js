@@ -1,17 +1,18 @@
 // 内存动量状态机：Four.meme 每次创建/买/卖都经过 Token Manager 一个地址，
 // 我们已订阅其全部日志，动量所需的一切都在事件流里 —— 零 RPC 查询。
-const state = new Map(); // token(lower) -> { buyers:Set, buyTs:number[], lastPriceWei:bigint, volRaw:bigint, funds:bigint, offers:bigint, peakMcapUsd:number }
+const state = new Map(); // token(lower) -> { buyers:Set, buyTs:number[], lastPriceWei:bigint, volRaw:bigint, funds:bigint, offers:bigint, peakMcapUsd:number, lastTradeTs:number }
 const WINDOW_MS = 30 * 60_000;
 
 function get(token) {
   const k = token.toLowerCase();
   let s = state.get(k);
-  if (!s) { s = { buyers: new Set(), buyTs: [], lastPriceWei: 0n, volRaw: 0n, funds: 0n, offers: 0n, peakMcapUsd: 0 }; state.set(k, s); }
+  if (!s) { s = { buyers: new Set(), buyTs: [], lastPriceWei: 0n, volRaw: 0n, funds: 0n, offers: 0n, peakMcapUsd: 0, lastTradeTs: 0 }; state.set(k, s); }
   return s;
 }
 
 export function onTrade({ token, account, price, cost, funds, offers, isBuy, ts = Date.now() }) {
   const s = get(token);
+  if (ts > s.lastTradeTs) s.lastTradeTs = ts; // 买/卖都算「活跃」，供归档判断（基于活动而非市值）
   if (isBuy && account) { s.buyers.add(account.toLowerCase()); s.buyTs.push(ts); }
   if (price != null) s.lastPriceWei = BigInt(price);
   if (funds != null) s.funds = BigInt(funds);
@@ -65,6 +66,12 @@ export function buyers(token) {
 export function buyerCount(token) {
   const s = state.get(token.toLowerCase());
   return s ? s.buyers.size : 0;
+}
+
+// 最后一次成交(买/卖)时间戳，供归档判断（基于活动而非市值），无记录返回 0
+export function lastTradeTs(token) {
+  const s = state.get(token.toLowerCase());
+  return s ? s.lastTradeTs : 0;
 }
 
 // 供漏杀率统计：即便被 reject，仍用免费事件流更新峰值

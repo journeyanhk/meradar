@@ -86,6 +86,24 @@ async function run() {
     }
   }
   console.log(`清洗完成: ${cleaned} 个候选的美元字段已归零、trades/snapshots 已清空(实时层将按正确口径重建)`);
+
+  // 3) 救回被「市值<1」旧归档规则误踢的币：这些币链上可能仍在成交，复活后重回跟踪集，
+  //    下一轮 pollCandidate 会用正确报价币重建市值/募集/进度。（新归档规则已改为基于活动）
+  const misArchived = db.prepare(
+    `SELECT key FROM candidates WHERE status='archived' AND reject_reason='无动量归档'
+       AND discovered_at > @since`,
+  ).all({ since: Date.now() - 24 * 3600 * 1000 });
+  console.log(`误归档待复活(近 24h、无动量归档): ${misArchived.length}`);
+  const revive = db.prepare(
+    `UPDATE candidates SET status='active', reject_reason=NULL, updated_at=@updated_at WHERE key=@key`,
+  );
+  let revived = 0;
+  for (const r of misArchived) {
+    revived++;
+    if (!DRY) revive.run({ key: r.key, updated_at: Date.now() });
+  }
+  console.log(`复活完成: ${revived} 个候选回到 active(重启后按活动重新判定归档)`);
+
   console.log(DRY ? '(DRY RUN 未写库)' : '完成。建议重启服务。');
 }
 

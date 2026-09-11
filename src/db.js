@@ -168,6 +168,7 @@ const stmt = {
   `),
   missedKills: db.prepare(`SELECT COUNT(*) AS missed FROM candidates WHERE status='rejected' AND peak_mcap_usd >= 1000000`),
   insertTrade: db.prepare(`INSERT INTO trades (key, ts, side, account, quote_amount, token_amount, price) VALUES (@key, @ts, @side, @account, @quote_amount, @token_amount, @price)`),
+  lastTradeTs: db.prepare(`SELECT MAX(ts) AS ts FROM trades WHERE key=?`),
   deleteOldTrades: db.prepare(`DELETE FROM trades WHERE ts < ?`),
   countTrades: db.prepare(`SELECT COUNT(*) AS n FROM trades`),
   tradeFlow: db.prepare(`
@@ -221,6 +222,7 @@ export const store = {
   feed(limit = 200) { return stmt.listFeed.all(limit); },
   stats(since24h) { return { ...stmt.stats.get(since24h), missed: stmt.missedKills.get().missed }; },
   addTrade(t) { stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, ...t }); },
+  lastTradeTs(key) { return stmt.lastTradeTs.get(key)?.ts ?? null; },
   purgeTrades(beforeMs) { return stmt.deleteOldTrades.run(beforeMs).changes; },
   tradeCount() { return stmt.countTrades.get().n; },
   tradeFlow(key, now = Date.now()) {

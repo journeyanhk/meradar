@@ -173,7 +173,11 @@ export function startTracker() {
       const actives = store.activeCandidates(config.tracking.maxActiveCandidates || 400);
       const toPoll = [];
       for (const cand of actives) {
-        if (cand.tier === 'T0' && Date.now() - cand.discovered_at > noMomentumMs && cand.market_cap_usd < 1) {
+        // 归档判据用「活动」而非「市值<1」：市值为 0 可能只是价格还没重建(清洗/重启后竞态)，
+        // 会把链上仍在成交的币误踢出跟踪集。改用最后一次成交距今，多源取最新以抗竞态：
+        // trades 表(实时落库) → 内存动量(含回填) → updated_at(清洗刚触过则视为活跃)。
+        const lastTradeTs = (store.lastTradeTs(cand.key) ?? momentum.lastTradeTs(cand.address)) || cand.updated_at || 0;
+        if (cand.tier === 'T0' && Date.now() - lastTradeTs > noMomentumMs) {
           store.setStatus(cand.key, 'archived', '无动量归档');
           momentum.forget(cand.address);
           if (cand.pool) bus.emit(Events.POOLS_CHANGED, { chain: cand.chain }); // 归档已毕业币需重建成交订阅
