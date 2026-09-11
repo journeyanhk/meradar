@@ -1,9 +1,10 @@
 import { config, chainConfig } from './config.js';
 import { startServer } from './server.js';
-import { startEngine } from './engine.js';
+import { startEngine, backfillRecentCreates } from './engine.js';
 import { httpClient } from './chain.js';
 import { refreshBnbUsd, getBnbUsd } from './enrich.js';
 import { store } from './db.js';
+import * as momentum from './momentum.js';
 import { logger } from './logger.js';
 
 // 启动自检：用当前 HTTP RPC 查最近 30 个区块、某发射台地址的日志，验证 eth_getLogs 未被封。
@@ -53,6 +54,23 @@ async function main() {
     const removed = store.purgeSnapshots(Date.now() - retainDays * 24 * 3600 * 1000);
     if (removed) logger.debug({ removed }, '清理过期快照');
   }, 3600_000);
+
+  // seen 清理：登记超 24h 仍无动量升级的候选归档，并释放内存动量状态，防止只增不减
+  function cleanupStaleSeen() {
+    const stale = store.staleSeen(Date.now() - 24 * 3600 * 1000);
+    for (const s of stale) {
+      store.setStatus(s.key, 'archived', 'seen 超 24h 无动量');
+      momentum.forget(s.address);
+    }
+    if (stale.length) logger.debug({ archived: stale.length }, '归档陈旧 seen 候选');
+  }
+  setInterval(cleanupStaleSeen, 3600_000);
+
+  // 启动回填最近 ~2h 的 TokenCreate，让慢热型老币也能进入跟踪
+  for (const chain of config.enabledChains) {
+    if (!config.rpc[chain]?.http) continue;
+    await backfillRecentCreates(chain, 2).catch((e) => logger.warn({ chain, err: e.message }, '回填失败(忽略)'));
+  }
 
   startEngine();
 }

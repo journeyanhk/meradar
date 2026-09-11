@@ -7,7 +7,7 @@
 ## 特性
 
 - **发现**：按工厂地址订阅日志（WebSocket）。Four.meme 订阅 Token Manager，按 `TokenCreate/TokenPurchase/TokenSale` 事件解码（topic0 已对照真实链上日志核验）；PancakeSwap V2/V3 用标准 `PairCreated`/`PoolCreated`（也捕获毕业迁移）。
-- **准入闸门**：`TokenCreate` 只登记为 `seen`（不轮询、零 RPC）；同一代币累计 **≥5 个独立买家**才升级为 `active` 并进入跟踪，从源头过滤噪声。
+- **准入闸门**：`TokenCreate` 只登记为 `seen`（不轮询、零 RPC）；同一代币累计 **≥5 个独立买家**才升级为 `active` 并进入跟踪，从源头过滤噪声。启动时回填最近 ~2h 的 `TokenCreate`，且任何未登记代币**首次出现买入即懒注册**——确保「服务启动前创建、之后才启动」的慢热币也能被抓到。
 - **富化**：读取 name/symbol/decimals/totalSupply、创建者、池子储备 → 流动性/价格/市值。BNB 现价每 60s 从 Pancake WBNB/USDT 池只读刷新。
 - **打分（只否决）**：创建者批量发币检测 + GoPlus 貔貅/高卖税检测 + 只读往返貔貅模拟（`getAmountsOut`）。安全指标只做减法，动量与叙事负责发现。
 - **跟踪层**：曲线期动量（独立买家、市值、成交量）全部来自**内存事件流状态机**（零 `eth_getLogs`）；毕业到 Pancake 后用池子真实储备定价。并发受限、每 45s 一轮，长期无动量自动归档。
@@ -61,6 +61,7 @@ SSE 走 Caddy 无需额外配置。systemd 见 `meradar.service.example`。
 
 - **Four.meme 曲线阶段**无 AMM 池，价格/市值由 `TokenPurchase` 事件携带的 `price × totalSupply × BNB 现价`推算，毕业到 Pancake 后切换为池子真实储备定价（更精确）。
 - 曲线期动量走**内存事件流**（订阅 Token Manager 全量日志），因此**不依赖 `eth_getLogs` 扫 Transfer**——规避了公共 RPC 的日志范围限制，也把候选轮询降到零 RPC。
+- **启动回填**用带地址的 `eth_getLogs` 拉最近 ~2h 的 `TokenCreate`。公共 RPC（publicnode）通常只服务近 ~1h 的日志、更早的分段会 403 被跳过（属正常，非故障）；付费 RPC 可覆盖完整窗口。无论回填是否命中，任何代币**首次买入都会懒注册**，慢热币不会漏。
 - 事件签名的 `topic0` 已用 `viem.toEventSelector` 对照真实链上日志核验（见 `test/unit.test.js`）；若 Four.meme 升级合约改了事件，替换 `src/abi.js` 的签名即可。
 - 貔貅 `getAmountsOut` 往返只反映定价/滑点，**不含 transfer 税**；transfer 税由 GoPlus 卖出税字段兜底，深度税检测（`eth_call` + stateOverride 真实 swap）为后续项。
 - 启动自检会用一次窄范围 `eth_getLogs`（带发射台地址）验证毕业池定价可用；若 RPC 封禁则只影响毕业池的精确定价，曲线期监控不受影响。

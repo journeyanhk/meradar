@@ -44,6 +44,16 @@ test('买家数达标判 T1', () => {
   assert.equal(evaluateTier({}, { ...base, uniqueBuyers: 40 }), 'T1');
 });
 
+test('毕业(graduated)归入 T2 而非 T3', () => {
+  assert.equal(evaluateTier({}, { ...base, graduated: true }), 'T2');
+});
+
+test('增速触发需满足最小买家基数', () => {
+  // holderGrowth10mPct=30，growthMinBuyers=20
+  assert.equal(evaluateTier({}, { ...base, uniqueBuyers: 7, holderGrowthPct: 40 }), 'T0');
+  assert.equal(evaluateTier({}, { ...base, uniqueBuyers: 22, holderGrowthPct: 40 }), 'T1');
+});
+
 test('叙事乘数放宽阈值：命中叙事时更低市值即可 T1', () => {
   // T1.marketCapUsd=100000，narrativeMultiplier=0.5 -> 命中后 5万即达标
   const m = { ...base, marketCapUsd: 60000 };

@@ -63,7 +63,7 @@ export async function pollCandidate(chain, cand) {
     narrativeHits: hits,
     isOriginal: !cand.copy_of,
     graduated: !!cand.graduated,
-    listing: !!cand.graduated, // 毕业到 Pancake 视为上所信号
+    listing: false, // 毕业不再直接判 T3；T3 保留给真实 CEX/Alpha 上币事件源（未来接入）
   };
 
   store.updateMetrics(cand.key, {

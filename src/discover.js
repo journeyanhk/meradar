@@ -101,6 +101,7 @@ function routeFourMeme(chain, lp, l, handlers) {
     if (!a.token) return;
     handlers.onTrade?.({
       chain, address: a.token, account: a.account || null,
+      launchpad: lp.id, label: lp.label,
       price: a.price ?? null, amount: a.amount ?? null, cost: a.cost ?? null, funds: a.funds ?? null,
       isBuy: name === 'TokenPurchase', ts: Date.now(),
     });

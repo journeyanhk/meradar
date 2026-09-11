@@ -7,8 +7,7 @@
     "snapshotRetentionDays": 7
   },
   "admission": {
-    "minBuyersToActivate": 5,
-    "windowMin": 10
+    "minBuyersToActivate": 5
   },
   "score": {
     "honeypot": {
@@ -24,6 +23,7 @@
     "T1": {
       "uniqueBuyers30m": 30,
       "holderGrowth10mPct": 30,
+      "growthMinBuyers": 20,
       "marketCapUsd": 100000
     },
     "T2": {

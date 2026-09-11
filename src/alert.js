@@ -35,12 +35,13 @@ export function evaluateTier(cand, m) {
 
   const t2 =
     (m.marketCapUsd >= T.T2.marketCapUsd * k && m.liquidityUsd >= T.T2.minLiquidityUsd * k) ||
-    (m.isOriginal && m.copycats >= T.T2.copycatCount);
+    (m.isOriginal && m.copycats >= T.T2.copycatCount) ||
+    m.graduated; // 毕业到 Pancake 归入 T2 强提示
   if (t2) return 'T2';
 
   const t1 =
     m.uniqueBuyers >= T.T1.uniqueBuyers30m * k ||
-    m.holderGrowthPct >= T.T1.holderGrowth10mPct * k ||
+    (m.uniqueBuyers >= (T.T1.growthMinBuyers || 20) && m.holderGrowthPct >= T.T1.holderGrowth10mPct) ||
     m.marketCapUsd >= T.T1.marketCapUsd * k;
   if (t1) return 'T1';
 

@@ -99,6 +99,7 @@ const stmt = {
   countSymbol: db.prepare(`SELECT COUNT(*) AS n FROM candidates WHERE chain=? AND symbol=? AND discovered_at >= ?`),
   countCreator: db.prepare(`SELECT COUNT(*) AS n FROM candidates WHERE chain=? AND creator=? AND discovered_at >= ?`),
   earliestSameSymbol: db.prepare(`SELECT key, discovered_at FROM candidates WHERE chain=? AND symbol=? ORDER BY discovered_at ASC LIMIT 1`),
+  staleSeen: db.prepare(`SELECT key, address FROM candidates WHERE status='seen' AND discovered_at < ? LIMIT 5000`),
   activeCandidates: db.prepare(`SELECT * FROM candidates WHERE status='active' ORDER BY (tier='T3') DESC, (tier='T2') DESC, updated_at DESC LIMIT ?`),
   listFeed: db.prepare(`
     SELECT * FROM candidates WHERE status IN ('active','archived','rejected')
@@ -138,6 +139,7 @@ export const store = {
   countSymbolSince(chain, symbol, sinceMs) { return stmt.countSymbol.get(chain, symbol, sinceMs).n; },
   countCreatorSince(chain, creator, sinceMs) { return stmt.countCreator.get(chain, creator, sinceMs).n; },
   earliestSameSymbol(chain, symbol) { return stmt.earliestSameSymbol.get(chain, symbol); },
+  staleSeen(beforeMs) { return stmt.staleSeen.all(beforeMs); },
   activeCandidates(limit = 400) { return stmt.activeCandidates.all(limit); },
   feed(limit = 200) { return stmt.listFeed.all(limit); },
   stats(since24h) { return { ...stmt.stats.get(since24h), missed: stmt.missedKills.get().missed }; },
