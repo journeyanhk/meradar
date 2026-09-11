@@ -5,6 +5,7 @@ import { ROOT, config } from './config.js';
 import { store } from './db.js';
 import { bus, Events } from './bus.js';
 import { linksFor } from './alert.js';
+import { healthSnapshot } from './health.js';
 import { child } from './logger.js';
 
 const log = child('server');
@@ -33,6 +34,7 @@ export async function startServer() {
   app.get('/api/health', async () => ({
     ok: true, chains: config.enabledChains,
     telegram: config.telegram.enabled, serverchan: config.serverchan.enabled,
+    runtime: healthSnapshot(),
     time: Date.now(),
   }));
 

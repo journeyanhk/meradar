@@ -23,20 +23,27 @@ function usd(n) {
   return `$${n.toFixed(0)}`;
 }
 
-// 计算候选应处的告警级别
+// 计算候选应处的告警级别。
+// 叙事不再单独构成 T2，而是「乘数」——命中叙事时按 narrativeMultiplier 放宽各档阈值。
+// 仿盘热度只让「原版」升级（copy_of 的候选 isOriginal=false，不因仿盘数升级）。
 export function evaluateTier(cand, m) {
   const T = config.tiers;
+  const hasNarrative = !!(m.narrativeHits && m.narrativeHits.length > 0);
+  const k = hasNarrative ? (T.narrativeMultiplier || 1) : 1; // <1 表示更容易触发
+
   if (m.listing) return 'T3';
+
   const t2 =
-    (m.marketCapUsd >= T.T2.marketCapUsd && m.liquidityUsd >= T.T2.minLiquidityUsd) ||
-    m.copycats >= T.T2.copycatCount ||
-    (m.narrativeHits && m.narrativeHits.length > 0);
+    (m.marketCapUsd >= T.T2.marketCapUsd * k && m.liquidityUsd >= T.T2.minLiquidityUsd * k) ||
+    (m.isOriginal && m.copycats >= T.T2.copycatCount);
   if (t2) return 'T2';
+
   const t1 =
-    m.uniqueBuyers >= T.T1.uniqueBuyers30m ||
-    m.holderGrowthPct >= T.T1.holderGrowth10mPct ||
-    m.marketCapUsd >= T.T1.marketCapUsd;
+    m.uniqueBuyers >= T.T1.uniqueBuyers30m * k ||
+    m.holderGrowthPct >= T.T1.holderGrowth10mPct * k ||
+    m.marketCapUsd >= T.T1.marketCapUsd * k;
   if (t1) return 'T1';
+
   return 'T0';
 }
 

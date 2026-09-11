@@ -3,5 +3,13 @@
 
 radar.example.com {
     encode zstd gzip
+
+    # 可选：整站 Basic Auth（雷达是只读监控，公网暴露建议加一层口令）。
+    # 生成密码哈希：caddy hash-password --plaintext '你的密码'
+    # 然后把下面的 用户名 和 哈希 替换掉，取消注释即可。
+    # basic_auth {
+    #     admin JDJhJDE0J...（caddy hash-password 生成的 bcrypt 哈希）
+    # }
+
     reverse_proxy 127.0.0.1:8787
 }

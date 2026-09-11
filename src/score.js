@@ -3,19 +3,21 @@ import { httpClient } from './chain.js';
 import { routerAbi } from './abi.js';
 import { chainConfig, config } from './config.js';
 import { store } from './db.js';
+import { goplusCheck } from './goplus.js';
 import { child } from './logger.js';
 
 const log = child('score');
 const DAY = 24 * 3600 * 1000;
 
 /**
- * 安全打分 = 只负责否决（veto）。动量与叙事负责发现（在 track/alert 层）。
+ * 安全打分 = 只否决。动量与叙事负责发现。
  * 返回 { veto, reason, checks }。
  */
 export async function scoreCandidate(chain, cand) {
+  const cfg = chainConfig(chain);
   const checks = {};
 
-  // 1. 创建者画像：24h 内批量发币
+  // 1. 创建者批量发币
   if (cand.creator) {
     const n = store.countCreatorSince(chain, cand.creator, Date.now() - DAY);
     checks.creatorTokens24h = n;
@@ -24,32 +26,36 @@ export async function scoreCandidate(chain, cand) {
     }
   }
 
-  // 2. 貔貅往返模拟（只读 getAmountsOut）。仅对已有 AMM 池的候选执行。
+  // 2. GoPlus token security（免费只读，曲线期也能查，无需池子）
+  if (config.score.goplus?.enabled && cfg.goplusId) {
+    const gp = await goplusCheck(cfg.goplusId, cand.address);
+    if (gp) {
+      checks.goplus = gp;
+      if (gp.isHoneypot) return { veto: true, reason: 'GoPlus:貔貅', checks };
+      if (gp.cannotSellAll) return { veto: true, reason: 'GoPlus:无法全部卖出', checks };
+      if (gp.sellTaxBps >= 2000) return { veto: true, reason: `GoPlus:卖出税${(gp.sellTaxBps / 100).toFixed(0)}%`, checks };
+    }
+  }
+
+  // 3. getAmountsOut 往返初筛（仅有 AMM 池时）
   const quote = cand.quote || cand.quote_symbol;
   if (config.score.honeypot?.enabled && cand.pool && quote) {
     const hp = await honeypotRoundTrip(chain, { ...cand, quote });
     checks.honeypot = hp;
-    if (hp && hp.ok === false) {
-      return { veto: true, reason: hp.reason, checks };
-    }
-  } else {
-    checks.honeypot = { status: 'pending', note: '无 AMM 池（曲线阶段），毕业后再检测' };
+    if (hp && hp.ok === false) return { veto: true, reason: hp.reason, checks };
+  } else if (!checks.goplus) {
+    checks.honeypot = { status: 'pending', note: '曲线期无池且 GoPlus 未覆盖，毕业后再检测' };
   }
 
   return { veto: false, checks };
 }
 
-/**
- * 只读往返：quote --getAmountsOut--> token --getAmountsOut--> quote，比较回收率。
- * 说明：getAmountsOut 反映的是池子定价曲线与滑点，不含 transfer 税；
- * 深度税/貔貅检测需要 eth_call + stateOverride 真实 swap 模拟（见 honeypotViaOverride 占位）。
- */
 async function honeypotRoundTrip(chain, cand) {
   const cfg = chainConfig(chain);
   const router = cfg.router;
   if (!router) return { status: 'skip', note: '未配置 router' };
   const client = httpClient(chain);
-  const amountIn = parseUnits('0.05', 18); // 0.05 报价币
+  const amountIn = parseUnits('0.05', 18);
   try {
     const buy = await client.readContract({
       address: router, abi: routerAbi, functionName: 'getAmountsOut',

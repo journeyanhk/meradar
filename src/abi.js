@@ -6,9 +6,6 @@ export const erc20Abi = parseAbi([
   'function decimals() view returns (uint8)',
   'function totalSupply() view returns (uint256)',
   'function balanceOf(address) view returns (uint256)',
-  'function allowance(address owner, address spender) view returns (uint256)',
-  'function approve(address spender, uint256 amount) returns (bool)',
-  'function transfer(address to, uint256 amount) returns (bool)',
 ]);
 
 export const pairAbi = parseAbi([
@@ -17,9 +14,22 @@ export const pairAbi = parseAbi([
   'function token1() view returns (address)',
 ]);
 
-// V2 路由，用于貔貅往返模拟 (getAmountsOut 只读估算)
+// PancakeSwap V3 池
+export const v3PoolAbi = parseAbi([
+  'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint32 feeProtocol, bool unlocked)',
+  'function token0() view returns (address)',
+  'function token1() view returns (address)',
+]);
+
 export const routerAbi = parseAbi([
   'function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)',
+]);
+
+// Four.meme Token Manager 事件（topic0 已对照真实日志核验，见 review）
+export const fourMemeEvents = parseAbi([
+  'event TokenCreate(address creator, address token, uint256 requestId, string name, string symbol, uint256 totalSupply, uint256 launchTime, uint256 launchFee)',
+  'event TokenPurchase(address token, address account, uint256 price, uint256 amount, uint256 cost, uint256 fee, uint256 offers, uint256 funds)',
+  'event TokenSale(address token, address account, uint256 price, uint256 amount, uint256 cost, uint256 fee, uint256 offers, uint256 funds)',
 ]);
 
 export const TRANSFER_TOPIC =
