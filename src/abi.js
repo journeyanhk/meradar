@@ -1,4 +1,4 @@
-import { parseAbi } from 'viem';
+import { parseAbi, parseAbiItem } from 'viem';
 
 export const erc20Abi = parseAbi([
   'function name() view returns (string)',
@@ -34,3 +34,21 @@ export const fourMemeEvents = parseAbi([
 
 export const TRANSFER_TOPIC =
   '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+
+// 毕业后成交订阅：一条订阅、地址数组、双 topic 覆盖所有已毕业活跃池。
+// V2 Swap topic0 = 0xd78ad95f…，V3 Swap topic0 = 0xc42079f9…（已核验）
+export const v2SwapEvent = parseAbiItem(
+  'event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)',
+);
+export const v3SwapEvent = parseAbiItem(
+  'event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)',
+);
+export const swapEvents = [v2SwapEvent, v3SwapEvent];
+
+// 毕业时按代币对反查池子地址（免 RPC 无法拿到 pool，故 promote 时主动查一次）
+export const v2FactoryAbi = parseAbi([
+  'function getPair(address tokenA, address tokenB) view returns (address pair)',
+]);
+export const v3FactoryAbi = parseAbi([
+  'function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)',
+]);

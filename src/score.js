@@ -4,6 +4,7 @@ import { routerAbi } from './abi.js';
 import { chainConfig, config } from './config.js';
 import { store } from './db.js';
 import { goplusCheck } from './goplus.js';
+import { resolveQuote } from './enrich.js';
 import { child } from './logger.js';
 
 const log = child('score');
@@ -37,10 +38,10 @@ export async function scoreCandidate(chain, cand) {
     }
   }
 
-  // 3. getAmountsOut 往返初筛（仅有 AMM 池时）
-  const quote = cand.quote || cand.quote_symbol;
-  if (config.score.honeypot?.enabled && cand.pool && quote) {
-    const hp = await honeypotRoundTrip(chain, { ...cand, quote });
+  // 3. getAmountsOut 往返初筛（仅有 AMM 池时）。报价币统一解析为地址后再走 router 路径。
+  const q = resolveQuote(cfg, cand.quote || cand.quote_symbol);
+  if (config.score.honeypot?.enabled && cand.pool && q) {
+    const hp = await honeypotRoundTrip(chain, { ...cand, quote: q.address });
     checks.honeypot = hp;
     if (hp && hp.ok === false) return { veto: true, reason: hp.reason, checks };
   } else if (!checks.goplus) {

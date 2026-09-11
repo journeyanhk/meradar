@@ -55,6 +55,12 @@ async function main() {
     if (removed) logger.debug({ removed }, '清理过期快照');
   }, 3600_000);
 
+  // 成交记录清理：保留 30 天（供阈值回放校准），每小时清一次
+  setInterval(() => {
+    const removed = store.purgeTrades(Date.now() - 30 * 24 * 3600 * 1000);
+    if (removed) logger.debug({ removed }, '清理过期成交记录');
+  }, 3600_000);
+
   // seen 清理：登记超 24h 仍无动量升级的候选直接删除（本就是噪声），并释放内存动量状态。
   // 关键：必须删除而非归档——归档后行仍存在，懒注册会因「行已存在」跳过它，
   // 导致「发行超 24h 才启动」的慢热币被永久忽略；删除后其首次买入会重新懒注册。
@@ -72,6 +78,14 @@ async function main() {
     if (!config.rpc[chain]?.http) continue;
     await backfillRecentCreates(chain, 2).catch((e) => logger.warn({ chain, err: e.message }, '回填失败(忽略)'));
   }
+
+  // 回灌 active 币的买家集合（buyers 表 -> 内存动量），保持去重与计数在重启后连续
+  let restored = 0;
+  for (const cand of store.activeCandidates(config.tracking.maxActiveCandidates || 400)) {
+    const accts = store.buyers(cand.key);
+    if (accts.length) { momentum.restore(cand.address, accts); restored += accts.length; }
+  }
+  if (restored) logger.info({ restored }, '已回灌 active 买家集合');
 
   startEngine();
 }

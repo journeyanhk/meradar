@@ -85,10 +85,15 @@ body {
 
 .metrics { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; color: var(--muted); font-size: 12px; }
 .metrics b { color: var(--text); font-weight: 600; }
+.metrics b.pos { color: var(--ok); }
+.metrics b.neg { color: var(--t2); }
+.metrics small { font-size: 10px; opacity: .7; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .tag { font-size: 11px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); border-radius: 6px; padding: 1px 6px; }
 
 .spark { width: 100%; height: 34px; display: block; margin: 4px 0; }
+.spark-wrap { position: relative; }
+.spark-lbl { position: absolute; top: 0; left: 0; font-size: 10px; color: var(--muted); opacity: .7; pointer-events: none; }
 .links { display: flex; gap: 12px; font-size: 12px; margin-top: 6px; }
 .links a { color: var(--accent); text-decoration: none; }
 .addr { color: var(--muted); font-size: 11px; font-family: ui-monospace, monospace; }

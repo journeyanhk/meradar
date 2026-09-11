@@ -51,14 +51,31 @@ export async function pollCandidate(chain, cand) {
   const hits = narrativeHit(cand.name, cand.symbol);
   const copycats = cand.copy_of ? 0 : copycatCount(chain, cand.symbol); // 仅原版累计仿盘热度
 
+  // 深度：曲线期=募集额(funds×BNB)，毕业后=池储备。单字段承载，depth_kind 标记来源。
+  let depthUsd, depthKind;
+  if (cand.pool && poolM) { depthUsd = poolM.liquidityUsd || prev?.depth_usd || 0; depthKind = 'amm'; }
+  else { depthUsd = (curve?.fundsBnb || 0) * bnbUsd || prev?.depth_usd || 0; depthKind = 'curve'; }
+  const offersPct = curve?.offersPct ?? prev?.offers_pct ?? 0;
+
+  // 净流入/最大单笔/买卖比/新买家 —— 全部一句 SQL 取自 trades 表
+  const flow = store.tradeFlow(cand.key);
+
   const metrics = {
-    liquidityUsd: poolM?.liquidityUsd || prev?.liquidity_usd || 0,
+    liquidityUsd: depthUsd,
+    depthUsd,
+    depthKind,
+    offersPct,
     priceUsd: poolM?.priceUsd || curve?.priceUsd || prev?.price_usd || 0,
     marketCapUsd: poolM?.marketCapUsd || curve?.marketCapUsd || prev?.market_cap_usd || 0,
     volumeUsd: curve?.volumeUsd || prev?.volume_usd || 0,
     holders: uniqueBuyers,
     uniqueBuyers,
     holderGrowthPct,
+    netIn30m: flow.net30,
+    netIn1h: flow.net1h,
+    maxBuy10m: flow.maxBuy10,
+    buyRatio30m: flow.buyRatio30,
+    newBuyers30m: flow.newBuyers30m,
     copycats,
     narrativeHits: hits,
     isOriginal: !cand.copy_of,
@@ -76,6 +93,14 @@ export async function pollCandidate(chain, cand) {
     copycats: metrics.copycats,
     narrative_hit: hits.join(',') || null,
     graduated: cand.graduated ? 1 : 0,
+    depth_usd: depthUsd,
+    depth_kind: depthKind,
+    offers_pct: offersPct,
+    net_in_30m: flow.net30,
+    net_in_1h: flow.net1h,
+    max_buy_10m: flow.maxBuy10,
+    buy_ratio_30m: flow.buyRatio30,
+    new_buyers_30m: flow.newBuyers30m,
   });
   store.addSnapshot({
     key: cand.key,
@@ -139,6 +164,7 @@ export function startTracker() {
         if (cand.tier === 'T0' && Date.now() - cand.discovered_at > noMomentumMs && cand.market_cap_usd < 1) {
           store.setStatus(cand.key, 'archived', '无动量归档');
           momentum.forget(cand.address);
+          if (cand.pool) bus.emit(Events.POOLS_CHANGED, { chain: cand.chain }); // 归档已毕业币需重建成交订阅
           continue;
         }
         toPoll.push(cand);

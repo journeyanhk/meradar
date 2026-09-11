@@ -38,11 +38,17 @@ export async function readCreator(chain, tx) {
   }
 }
 
-function quoteInfo(cfg, quoteAddr) {
+// 统一解析报价币：既能吃符号(WBNB)也能吃地址(0xbb4c…)，历史库里两种都出现过。
+// 返回 { sym, address, decimals }，解析不了返回 null。
+export function resolveQuote(cfg, symOrAddr) {
+  if (!symOrAddr) return null;
+  const s = String(symOrAddr).toLowerCase();
   for (const [sym, q] of Object.entries(cfg.quoteTokens)) {
-    if (q.address.toLowerCase() === quoteAddr.toLowerCase()) return { sym, decimals: q.decimals };
+    if (sym === symOrAddr || q.address.toLowerCase() === s) {
+      return { sym, address: q.address, decimals: q.decimals };
+    }
   }
-  return { sym: 'QUOTE', decimals: 18 };
+  return null;
 }
 
 function quoteUsdPrice(chain, cfg, sym) {
@@ -82,13 +88,20 @@ export function getBnbUsd(chain) {
   return bnbUsdCache.get(chain) || cfg.wbnbUsdPriceFallback || 900;
 }
 
+// 报价币 -> 美元单价（供成交额换算），稳定币=1，WBNB=现价。
+export function quoteUsd(chain, sym) {
+  const cfg = chainConfig(chain);
+  return quoteUsdPrice(chain, cfg, sym);
+}
+
 // 读池子 -> 流动性/价格/市值。支持 V2(getReserves) 与 V3(slot0)。
 export async function readPoolMetrics(chain, { pool, poolType, token, quote, decimals, totalSupply }) {
   if (!pool || !quote) return null;
   const cfg = chainConfig(chain);
+  const q = resolveQuote(cfg, quote);
+  if (!q) { log.debug({ quote }, '无法解析报价币，跳过池子定价'); return null; }
   const client = httpClient(chain);
-  const qi = quoteInfo(cfg, quote);
-  const quoteUsd = quoteUsdPrice(chain, cfg, qi.sym);
+  const quoteUsd = quoteUsdPrice(chain, cfg, q.sym);
   const memeDec = decimals || 18;
   const supply = totalSupply ? Number(formatUnits(totalSupply, memeDec)) : 0;
 
@@ -99,23 +112,23 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
         contracts: [
           { address: pool, abi: v3PoolAbi, functionName: 'slot0' },
           { address: pool, abi: v3PoolAbi, functionName: 'token0' },
-          { address: quote, abi: erc20Abi, functionName: 'balanceOf', args: [pool] },
+          { address: q.address, abi: erc20Abi, functionName: 'balanceOf', args: [pool] },
           { address: token, abi: erc20Abi, functionName: 'balanceOf', args: [pool] },
         ],
       });
       const sqrtP = slot0[0];
-      const quoteIsT0 = token0.toLowerCase() === quote.toLowerCase();
-      const dec0 = quoteIsT0 ? qi.decimals : memeDec;
-      const dec1 = quoteIsT0 ? memeDec : qi.decimals;
+      const quoteIsT0 = token0.toLowerCase() === q.address.toLowerCase();
+      const dec0 = quoteIsT0 ? q.decimals : memeDec;
+      const dec1 = quoteIsT0 ? memeDec : q.decimals;
       const ratio = Number(sqrtP) / 2 ** 96;
       const pRaw = ratio * ratio; // token1/token0 (raw)
       const human1per0 = pRaw * 10 ** (dec0 - dec1); // token1 per token0 (human)
       // 价格 = quote per meme
       const priceInQuote = quoteIsT0 ? 1 / human1per0 : human1per0;
       const priceUsd = priceInQuote * quoteUsd;
-      const quoteBalHuman = Number(formatUnits(qBal, qi.decimals));
+      const quoteBalHuman = Number(formatUnits(qBal, q.decimals));
       const liquidityUsd = quoteBalHuman * quoteUsd * 2;
-      return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: qi.sym };
+      return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: q.sym };
     }
 
     // V2
@@ -126,12 +139,12 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
         { address: pool, abi: pairAbi, functionName: 'token0' },
       ],
     });
-    const quoteIsT0 = token0.toLowerCase() === quote.toLowerCase();
-    const quoteReserve = Number(formatUnits(quoteIsT0 ? reserves[0] : reserves[1], qi.decimals));
+    const quoteIsT0 = token0.toLowerCase() === q.address.toLowerCase();
+    const quoteReserve = Number(formatUnits(quoteIsT0 ? reserves[0] : reserves[1], q.decimals));
     const tokenReserve = Number(formatUnits(quoteIsT0 ? reserves[1] : reserves[0], memeDec));
     const liquidityUsd = quoteReserve * quoteUsd * 2;
     const priceUsd = tokenReserve > 0 ? (quoteReserve * quoteUsd) / tokenReserve : 0;
-    return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: qi.sym };
+    return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: q.sym };
   } catch (e) {
     recordRpcError();
     log.warn({ err: e.message, pool, poolType }, '读取池子指标失败');

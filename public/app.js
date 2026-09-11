@@ -46,7 +46,9 @@ function esc(s) { const d = document.createElement('div'); d.textContent = s == 
 
 function sparkline(snaps) {
   if (!snaps || snaps.length < 2) return '';
-  const vals = snaps.map((s) => s.market_cap_usd || s.price_usd || s.unique_buyers || 0);
+  const useMcap = snaps.some((s) => s.market_cap_usd > 0);
+  const label = useMcap ? '市值走势' : '买家走势';
+  const vals = snaps.map((s) => (useMcap ? s.market_cap_usd : s.unique_buyers) || 0);
   const max = Math.max(...vals), min = Math.min(...vals);
   const W = 300, H = 34, n = vals.length;
   const pts = vals.map((v, i) => {
@@ -56,7 +58,7 @@ function sparkline(snaps) {
   }).join(' ');
   const up = vals[vals.length - 1] >= vals[0];
   const col = up ? 'var(--ok)' : 'var(--t2)';
-  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><polyline fill="none" stroke="${col}" stroke-width="1.5" points="${pts}"/></svg>`;
+  return `<div class="spark-wrap"><span class="spark-lbl">${label}</span><svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><polyline fill="none" stroke="${col}" stroke-width="1.5" points="${pts}"/></svg></div>`;
 }
 
 function visible(d) {
@@ -66,6 +68,19 @@ function visible(d) {
   return true;
 }
 
+function signed(n) {
+  n = +n || 0;
+  const s = usd(Math.abs(n));
+  return n >= 0 ? '+' + s : '-' + s;
+}
+
+function depthLabel(d) {
+  const val = usd(d.depthUsd || d.liquidityUsd || 0);
+  if (d.depthKind === 'amm') return `流动性 <b>${val}</b>`;
+  const rem = d.offersPct != null ? ` · 剩余${(+d.offersPct).toFixed(0)}%` : '';
+  return `曲线募集 <b>${val}</b>${rem}`;
+}
+
 function cardHtml(d) {
   const tags = [];
   (d.narrativeHit || []).forEach((h) => tags.push(`<span class="tag">🔥${esc(h)}</span>`));
@@ -73,6 +88,9 @@ function cardHtml(d) {
   const badges = [`<span class="badge ${d.tier}">${d.tier}</span>`];
   if (d.graduated) badges.push('<span class="badge grad">毕业</span>');
   const links = Object.entries(d.links || {}).map(([k, v]) => `<a href="${v}" target="_blank" rel="noopener">${k}</a>`).join('');
+  const net = +d.netIn30m || 0;
+  const netCls = net > 0 ? 'pos' : net < 0 ? 'neg' : '';
+  const dd = +d.drawdownPct || 0;
   return `
     <div class="row1">
       <div><span class="sym">${esc(d.symbol || '?')}</span><span class="name">${esc(d.name || '')}</span></div>
@@ -81,8 +99,10 @@ function cardHtml(d) {
     ${tags.length ? `<div class="tags">${tags.join('')}</div>` : ''}
     <div class="metrics">
       <span>市值 <b>${usd(d.marketCapUsd)}</b></span>
-      <span>流动性 <b>${usd(d.liquidityUsd)}</b></span>
-      <span>买家 <b>${d.uniqueBuyers || 0}</b></span>
+      <span>净流入30m <b class="${netCls}">${signed(net)}</b></span>
+      <span>${depthLabel(d)}</span>
+      <span>距峰值 <b>${dd > 0 ? '-' + dd.toFixed(0) + '%' : '—'}</b></span>
+      <span>新买家<small>(监测期)</small> <b>${d.uniqueBuyers || 0}</b></span>
       <span>${esc(d.launchpad || '')}</span>
       <span>${ago(d.discoveredAt)}前</span>
     </div>
