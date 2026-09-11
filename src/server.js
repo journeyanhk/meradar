@@ -13,11 +13,17 @@ const log = child('server');
 function decorate(c) {
   let safety = null;
   try { safety = c.safety_json ? JSON.parse(c.safety_json) : null; } catch { /* noop */ }
+  const peak = c.peak_mcap_usd || 0;
+  const drawdownPct = peak > 0 ? Math.max(0, ((peak - (c.market_cap_usd || 0)) / peak) * 100) : 0;
   return {
     key: c.key, chain: c.chain, address: c.address, launchpad: c.launchpad,
     name: c.name, symbol: c.symbol, tier: c.tier, status: c.status,
     graduated: !!c.graduated, creator: c.creator,
     liquidityUsd: c.liquidity_usd, priceUsd: c.price_usd, marketCapUsd: c.market_cap_usd,
+    depthUsd: c.depth_usd || 0, depthKind: c.depth_kind || 'curve', offersPct: c.offers_pct || 0,
+    peakMcapUsd: peak, drawdownPct,
+    netIn30m: c.net_in_30m || 0, netIn1h: c.net_in_1h || 0,
+    maxBuy10m: c.max_buy_10m || 0, buyRatio30m: c.buy_ratio_30m || 0, newBuyers30m: c.new_buyers_30m || 0,
     holders: c.holders, uniqueBuyers: c.unique_buyers, copycats: c.copycats,
     narrativeHit: c.narrative_hit ? c.narrative_hit.split(',').filter(Boolean) : [],
     discoveredAt: c.discovered_at, updatedAt: c.updated_at,

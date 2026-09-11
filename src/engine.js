@@ -1,17 +1,30 @@
-import { watchChain } from './discover.js';
-import { readToken } from './enrich.js';
+import { watchChain, resubscribeSwaps } from './discover.js';
+import { readToken, getBnbUsd, quoteUsd } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { store } from './db.js';
 import { config, chainConfig } from './config.js';
 import { httpClient } from './chain.js';
-import { fourMemeEvents } from './abi.js';
+import { fourMemeEvents, v2FactoryAbi, v3FactoryAbi } from './abi.js';
 import { bus, Events } from './bus.js';
 import { startTracker } from './track.js';
 import * as momentum from './momentum.js';
-import { recordSeen, recordPromoted } from './health.js';
+import { recordSeen, recordPromoted, recordTradeWrite, setSwapPools } from './health.js';
 import { child } from './logger.js';
 
 const log = child('engine');
+const V3_FEES = [100, 500, 2500, 10000];
+
+// 曲线期成交落库（USD 计价，仅 active 币）
+function recordCurveTrade(t, cand) {
+  const bnbUsd = getBnbUsd(t.chain);
+  const usd = t.cost != null ? (Number(t.cost) / 1e18) * bnbUsd : 0;
+  const tokenHuman = t.amount != null ? Number(t.amount) / 1e18 : 0;
+  const side = t.isBuy ? 'buy' : 'sell';
+  const ts = t.ts || Date.now();
+  store.addTrade({ key: cand.key, ts, side, account: t.account, quote_amount: usd, token_amount: tokenHuman, price: tokenHuman > 0 ? usd / tokenHuman : 0 });
+  if (side === 'buy' && t.account) store.addBuyer(cand.key, t.account, ts);
+  recordTradeWrite();
+}
 
 // TokenCreate：只登记，不轮询。事件已带 name/symbol/creator/totalSupply，零 RPC。
 async function onCreate(c) {
@@ -36,12 +49,16 @@ async function onCreate(c) {
 async function onTrade(t) {
   momentum.onTrade({
     token: t.address, account: t.account, price: t.price,
-    cost: t.cost, funds: t.funds, isBuy: t.isBuy, ts: t.ts,
+    cost: t.cost, funds: t.funds, offers: t.offers, isBuy: t.isBuy, ts: t.ts,
   });
-  if (!t.isBuy) return;
 
   const key = `${t.chain}:${t.address.toLowerCase()}`;
   let cand = store.get(key);
+
+  // 活跃币的每笔成交(买/卖)落库，供净流入/最大单笔/买卖比与回放
+  if (cand && cand.status === 'active') recordCurveTrade(t, cand);
+
+  if (!t.isBuy) return;
 
   // 懒注册：服务启动前创建的老币，首次出现买入时补登记为 seen。
   // （$牛来 式慢热币常在发行数小时后才启动，否则会被下一行直接丢弃而永远进不了跟踪。）
@@ -70,6 +87,10 @@ async function onTrade(t) {
   // 升级：seen -> active（promote 内部保证只对 seen 生效，天然幂等）
   if (!store.promote(key)) return;
   recordPromoted();
+
+  // promote 那一刻把内存买家集合整体落库；此后增量 INSERT OR IGNORE
+  const dumpTs = Date.now();
+  for (const acc of momentum.buyers(t.address)) store.addBuyer(key, acc, dumpTs);
 
   // 元数据兜底：若创建事件缺 symbol，补一次链上读取（仅此刻，一次性）
   let fresh = store.get(key);
@@ -102,11 +123,58 @@ async function onTrade(t) {
     return;
   }
 
+  // 若该币在被我们跟踪前已毕业（pool 尚未由 AMM 事件补上），主动反查一次池子
+  if (!fresh.pool) await discoverPool(t.chain, fresh).catch((e) => log.debug({ err: e.message }, 'discoverPool'));
+
   bus.emit(Events.CANDIDATE, { ...store.get(key) });
   log.info({ chain: t.chain, symbol: fresh.symbol, buyers: momentum.buyerCount(t.address) }, '候选升级为 active');
 }
 
-// AMM 建池 / 毕业：补池子地址与类型，供 track 定价。
+// 毕业后成交（AMM Swap）：喂动量买家 + 落库，与曲线期同源同表。
+async function onSwap(sw) {
+  const key = `${sw.chain}:${sw.address.toLowerCase()}`;
+  const cand = store.get(key);
+  if (!cand || cand.status !== 'active') return;
+  const isBuy = sw.side === 'buy';
+  momentum.onTrade({ token: sw.address, account: isBuy ? sw.account : null, isBuy, ts: sw.ts });
+  const usd = (sw.quoteHuman || 0) * quoteUsd(sw.chain, sw.quoteSym);
+  store.addTrade({
+    key, ts: sw.ts, side: sw.side, account: sw.account,
+    quote_amount: usd, token_amount: sw.tokenHuman || 0,
+    price: sw.tokenHuman > 0 ? usd / sw.tokenHuman : 0,
+  });
+  if (isBuy && sw.account) store.addBuyer(key, sw.account, sw.ts);
+  recordTradeWrite();
+}
+
+// promote 时反查池子：遍历报价币 × (V2 getPair / V3 各费率 getPool)，取第一个非零池。
+async function discoverPool(chain, cand) {
+  const cfg = chainConfig(chain);
+  const token = cand.address;
+  const quotes = Object.entries(cfg.quoteTokens); // [sym, {address, decimals}]
+  const v2 = cfg.launchpads?.find((l) => l.type === 'amm-v2' && l.address && !/^0x0+$/.test(l.address));
+  const v3 = cfg.launchpads?.find((l) => l.type === 'amm-v3' && l.address && !/^0x0+$/.test(l.address));
+  const calls = [];
+  if (v2) for (const [sym, q] of quotes) calls.push({ kind: 'v2', sym, c: { address: v2.address, abi: v2FactoryAbi, functionName: 'getPair', args: [token, q.address] } });
+  if (v3) for (const [sym, q] of quotes) for (const fee of V3_FEES) calls.push({ kind: 'v3', sym, c: { address: v3.address, abi: v3FactoryAbi, functionName: 'getPool', args: [token, q.address, fee] } });
+  if (!calls.length) return;
+  const client = httpClient(chain);
+  let res;
+  try { res = await client.multicall({ allowFailure: true, contracts: calls.map((x) => x.c) }); }
+  catch (e) { log.debug({ err: e.message }, 'discoverPool multicall 失败'); return; }
+  for (let i = 0; i < res.length; i++) {
+    const r = res[i];
+    const addr = r?.status === 'success' ? r.result : null;
+    if (addr && !/^0x0+$/.test(addr)) {
+      store.setPool(cand.key, addr, calls[i].kind === 'v3' ? 'v3' : 'v2', calls[i].sym);
+      log.info({ token: cand.symbol, pool: addr, via: calls[i].kind }, 'promote 反查到已毕业池');
+      bus.emit(Events.POOLS_CHANGED, { chain });
+      return;
+    }
+  }
+}
+
+// AMM 建池 / 毕业：补池子地址与类型，供 track 定价，并重建成交订阅。
 async function onAmm(c) {
   const key = `${c.chain}:${c.address.toLowerCase()}`;
   const existing = store.get(key);
@@ -114,7 +182,31 @@ async function onAmm(c) {
   if (existing.pool) return;
   store.setPool(key, c.pool, c.poolType, c.quote);
   log.info({ token: existing.symbol, pool: c.pool }, '候选建池/毕业，已补池子');
+  bus.emit(Events.POOLS_CHANGED, { chain: c.chain });
   bus.emit(Events.UPDATE, { ...store.get(key) });
+}
+
+// 单条动态订阅：覆盖某链所有 active 且已建池的池子；集合变化时整体重建。
+const swapUnwatch = new Map(); // chain -> unwatch
+function rebuildSwaps(chain) {
+  const cfg = chainConfig(chain);
+  const pools = store.swapPools()
+    .filter((r) => r.chain === chain && r.pool)
+    .map((r) => {
+      const q = cfg.quoteTokens[r.quote_symbol] || {};
+      const quoteAddr = (q.address || '').toLowerCase();
+      const tokenAddr = r.address.toLowerCase();
+      return {
+        address: r.pool, token: r.address, quote: quoteAddr, quoteSym: r.quote_symbol,
+        quoteDecimals: q.decimals || 18, tokenDecimals: r.decimals || 18,
+        poolType: r.pool_type === 'v3' ? 'v3' : 'v2',
+        quoteIsToken0: quoteAddr ? quoteAddr < tokenAddr : false,
+      };
+    })
+    .filter((p) => p.quote && p.address);
+  swapUnwatch.get(chain)?.();
+  swapUnwatch.set(chain, pools.length ? resubscribeSwaps(chain, pools, (sw) => onSwap(sw).catch((e) => log.debug({ err: e.message }, 'onSwap'))) : null);
+  setSwapPools(store.swapPools().filter((r) => r.pool).length);
 }
 
 // 启动回填：拉取最近 ~hours 小时的 TokenCreate 登记为 seen，
@@ -146,15 +238,24 @@ export async function backfillRecentCreates(chain, hours = 2) {
       }
     }
     for (const l of logs || []) {
-      if (l.eventName !== 'TokenCreate') continue;
       const a = l.args || {};
-      if (!a.token) continue;
-      await onCreate({
-        chain, address: a.token, launchpad: lp.id, label: lp.label,
-        creator: a.creator || null, name: a.name || null, symbol: a.symbol || null,
-        totalSupply: a.totalSupply ?? null, tx: l.transactionHash, block: Number(l.blockNumber || 0),
-      }).catch(() => {});
-      count++;
+      if (l.eventName === 'TokenCreate') {
+        if (!a.token) continue;
+        await onCreate({
+          chain, address: a.token, launchpad: lp.id, label: lp.label,
+          creator: a.creator || null, name: a.name || null, symbol: a.symbol || null,
+          totalSupply: a.totalSupply ?? null, tx: l.transactionHash, block: Number(l.blockNumber || 0),
+        }).catch(() => {});
+        count++;
+      } else if (l.eventName === 'TokenPurchase' || l.eventName === 'TokenSale') {
+        // 回填期把历史买卖也喂进动量：累积买家数，使启动后首笔实时买入即可触发升级
+        if (!a.token) continue;
+        momentum.onTrade({
+          token: a.token, account: a.account || null, price: a.price ?? null,
+          cost: a.cost ?? null, funds: a.funds ?? null, offers: a.offers ?? null,
+          isBuy: l.eventName === 'TokenPurchase', ts: Date.now(),
+        });
+      }
     }
     from = to + 1n;
     await sleep(250); // 分段间隔，降低被限流概率
@@ -164,6 +265,11 @@ export async function backfillRecentCreates(chain, hours = 2) {
 }
 
 export function startEngine() {
+  // 毕业池集合变化（新毕业 / 归档）时重建单条 Swap 订阅
+  bus.on(Events.POOLS_CHANGED, ({ chain }) => {
+    try { rebuildSwaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildSwaps'); }
+  });
+
   for (const chain of config.enabledChains) {
     try {
       watchChain(chain, {
@@ -171,6 +277,8 @@ export function startEngine() {
         onTrade: (t) => onTrade(t).catch((e) => log.debug({ err: e.message }, 'onTrade')),
         onAmm: (c) => onAmm(c).catch((e) => log.debug({ err: e.message }, 'onAmm')),
       });
+      // 启动时按库中已有的毕业池建一次订阅（覆盖重启前已毕业的活跃币）
+      try { rebuildSwaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildSwaps(启动)'); }
       log.info({ chain }, '链监听已启动');
     } catch (e) {
       log.error({ chain, err: e.message }, '链监听启动失败（检查 RPC 配置）');

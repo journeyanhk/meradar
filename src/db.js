@@ -66,7 +66,49 @@ CREATE TABLE IF NOT EXISTS alerts (
   sent_serverchan INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_alert_ts ON alerts(ts);
+
+-- 活跃币每笔成交落库：净流入/最大单笔/买卖比全变一句 SQL，且可回放校准阈值。
+-- quote_amount 统一为「美元计价」，便于跨报价币(BNB/USDT)直接求和。只写 active。
+CREATE TABLE IF NOT EXISTS trades (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  key          TEXT NOT NULL,
+  ts           INTEGER NOT NULL,
+  side         TEXT NOT NULL,      -- buy | sell
+  account      TEXT,
+  quote_amount REAL,               -- 成交额(USD)
+  token_amount REAL,               -- 代币数量(human)
+  price        REAL                -- 单价(USD)
+);
+CREATE INDEX IF NOT EXISTS idx_trades_key_ts ON trades(key, ts);
+
+-- 活跃币买家集合持久化：promote 时整体落库，之后增量 INSERT OR IGNORE，启动回灌。
+CREATE TABLE IF NOT EXISTS buyers (
+  key       TEXT NOT NULL,
+  account   TEXT NOT NULL,
+  first_ts  INTEGER,
+  PRIMARY KEY (key, account)
+);
 `);
+
+// 幂等迁移：node:sqlite 错误信息少，用 PRAGMA table_info 判断列是否存在再 ADD COLUMN，
+// 不用 try/catch 吞错误。
+function ensureColumns(table, cols) {
+  const existing = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name));
+  for (const [name, ddl] of cols) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+ensureColumns('candidates', [
+  ['depth_usd', 'depth_usd REAL DEFAULT 0'],          // 曲线期=募集额(funds×BNB)，毕业后=池储备
+  ['depth_kind', "depth_kind TEXT DEFAULT 'curve'"],  // curve | amm
+  ['offers_pct', 'offers_pct REAL DEFAULT 0'],        // 曲线期剩余未售供应占比
+  ['launch_time', 'launch_time INTEGER'],
+  ['net_in_30m', 'net_in_30m REAL DEFAULT 0'],
+  ['net_in_1h', 'net_in_1h REAL DEFAULT 0'],
+  ['max_buy_10m', 'max_buy_10m REAL DEFAULT 0'],
+  ['buy_ratio_30m', 'buy_ratio_30m REAL DEFAULT 0'],
+  ['new_buyers_30m', 'new_buyers_30m INTEGER DEFAULT 0'],
+]);
 
 const stmt = {
   upsertCandidate: db.prepare(`
@@ -86,6 +128,9 @@ const stmt = {
     UPDATE candidates SET liquidity_usd=@liquidity_usd, price_usd=@price_usd, market_cap_usd=@market_cap_usd,
       volume_usd=@volume_usd, holders=@holders, unique_buyers=@unique_buyers, copycats=@copycats,
       narrative_hit=@narrative_hit, graduated=@graduated, peak_mcap_usd=MAX(peak_mcap_usd, @market_cap_usd),
+      depth_usd=@depth_usd, depth_kind=@depth_kind, offers_pct=@offers_pct,
+      net_in_30m=@net_in_30m, net_in_1h=@net_in_1h, max_buy_10m=@max_buy_10m,
+      buy_ratio_30m=@buy_ratio_30m, new_buyers_30m=@new_buyers_30m,
       updated_at=@updated_at WHERE key=@key
   `),
   updatePeak: db.prepare(`UPDATE candidates SET peak_mcap_usd=MAX(peak_mcap_usd, @mcap) WHERE key=@key`),
@@ -118,6 +163,22 @@ const stmt = {
     FROM candidates
   `),
   missedKills: db.prepare(`SELECT COUNT(*) AS missed FROM candidates WHERE status='rejected' AND peak_mcap_usd >= 1000000`),
+  insertTrade: db.prepare(`INSERT INTO trades (key, ts, side, account, quote_amount, token_amount, price) VALUES (@key, @ts, @side, @account, @quote_amount, @token_amount, @price)`),
+  deleteOldTrades: db.prepare(`DELETE FROM trades WHERE ts < ?`),
+  countTrades: db.prepare(`SELECT COUNT(*) AS n FROM trades`),
+  tradeFlow: db.prepare(`
+    SELECT
+      SUM(CASE WHEN ts>=@t30 THEN (CASE side WHEN 'buy' THEN quote_amount ELSE -quote_amount END) ELSE 0 END) AS net30,
+      SUM(CASE WHEN ts>=@t1h THEN (CASE side WHEN 'buy' THEN quote_amount ELSE -quote_amount END) ELSE 0 END) AS net1h,
+      MAX(CASE WHEN ts>=@t10 AND side='buy' THEN quote_amount ELSE 0 END) AS maxBuy10,
+      SUM(CASE WHEN ts>=@t30 AND side='buy' THEN quote_amount ELSE 0 END) AS buy30,
+      SUM(CASE WHEN ts>=@t30 AND side='sell' THEN quote_amount ELSE 0 END) AS sell30
+    FROM trades WHERE key=@key
+  `),
+  newBuyers30m: db.prepare(`SELECT COUNT(*) AS n FROM buyers WHERE key=@key AND first_ts>=@since`),
+  insertBuyer: db.prepare(`INSERT OR IGNORE INTO buyers (key, account, first_ts) VALUES (@key, @account, @first_ts)`),
+  buyersForKey: db.prepare(`SELECT account FROM buyers WHERE key=?`),
+  swapPools: db.prepare(`SELECT key, chain, address, decimals, pool, pool_type, quote_symbol FROM candidates WHERE status='active' AND pool IS NOT NULL`),
 };
 
 export const store = {
@@ -128,7 +189,14 @@ export const store = {
   setPool(key, pool, pool_type, quote) { stmt.setPool.run({ key, pool, pool_type, quote, updated_at: Date.now() }); },
   promote(key) { return stmt.promote.run({ key, updated_at: Date.now() }).changes > 0; },
   setCopyOf(key, copy_of) { stmt.setCopyOf.run({ key, copy_of, updated_at: Date.now() }); },
-  updateMetrics(key, m) { stmt.updateMetrics.run({ key, updated_at: Date.now(), volume_usd: 0, ...m }); },
+  updateMetrics(key, m) {
+    stmt.updateMetrics.run({
+      key, updated_at: Date.now(),
+      volume_usd: 0, depth_usd: 0, depth_kind: 'curve', offers_pct: 0,
+      net_in_30m: 0, net_in_1h: 0, max_buy_10m: 0, buy_ratio_30m: 0, new_buyers_30m: 0,
+      ...m,
+    });
+  },
   updatePeak(key, mcap) { stmt.updatePeak.run({ key, mcap }); },
   setTier(key, tier) { stmt.setTier.run({ key, tier, updated_at: Date.now() }); },
   setStatus(key, status, reject_reason = null) { stmt.setStatus.run({ key, status, reject_reason, updated_at: Date.now() }); },
@@ -145,4 +213,20 @@ export const store = {
   activeCandidates(limit = 400) { return stmt.activeCandidates.all(limit); },
   feed(limit = 200) { return stmt.listFeed.all(limit); },
   stats(since24h) { return { ...stmt.stats.get(since24h), missed: stmt.missedKills.get().missed }; },
+  addTrade(t) { stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, ...t }); },
+  purgeTrades(beforeMs) { return stmt.deleteOldTrades.run(beforeMs).changes; },
+  tradeCount() { return stmt.countTrades.get().n; },
+  tradeFlow(key, now = Date.now()) {
+    const r = stmt.tradeFlow.get({ key, t30: now - 30 * 60_000, t1h: now - 3600_000, t10: now - 10 * 60_000 });
+    const buy30 = r.buy30 || 0, sell30 = r.sell30 || 0;
+    const newBuyers = stmt.newBuyers30m.get({ key, since: now - 30 * 60_000 }).n;
+    return {
+      net30: r.net30 || 0, net1h: r.net1h || 0, maxBuy10: r.maxBuy10 || 0,
+      buyRatio30: sell30 > 0 ? buy30 / sell30 : (buy30 > 0 ? 999 : 0),
+      newBuyers30m: newBuyers,
+    };
+  },
+  addBuyer(key, account, first_ts) { stmt.insertBuyer.run({ key, account: account.toLowerCase(), first_ts }); },
+  buyers(key) { return stmt.buyersForKey.all(key).map((r) => r.account); },
+  swapPools() { return stmt.swapPools.all(); },
 };

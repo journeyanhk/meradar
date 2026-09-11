@@ -82,6 +82,12 @@ export function getBnbUsd(chain) {
   return bnbUsdCache.get(chain) || cfg.wbnbUsdPriceFallback || 900;
 }
 
+// 报价币 -> 美元单价（供成交额换算），稳定币=1，WBNB=现价。
+export function quoteUsd(chain, sym) {
+  const cfg = chainConfig(chain);
+  return quoteUsdPrice(chain, cfg, sym);
+}
+
 // 读池子 -> 流动性/价格/市值。支持 V2(getReserves) 与 V3(slot0)。
 export async function readPoolMetrics(chain, { pool, poolType, token, quote, decimals, totalSupply }) {
   if (!pool || !quote) return null;

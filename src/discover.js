@@ -1,7 +1,7 @@
-import { parseAbiItem } from 'viem';
+import { parseAbiItem, formatUnits } from 'viem';
 import { wsClient } from './chain.js';
 import { chainConfig } from './config.js';
-import { fourMemeEvents } from './abi.js';
+import { fourMemeEvents, swapEvents } from './abi.js';
 import { recordWsLog, recordRpcError } from './health.js';
 import { child } from './logger.js';
 
@@ -102,8 +102,70 @@ function routeFourMeme(chain, lp, l, handlers) {
     handlers.onTrade?.({
       chain, address: a.token, account: a.account || null,
       launchpad: lp.id, label: lp.label,
-      price: a.price ?? null, amount: a.amount ?? null, cost: a.cost ?? null, funds: a.funds ?? null,
+      price: a.price ?? null, amount: a.amount ?? null, cost: a.cost ?? null,
+      offers: a.offers ?? null, funds: a.funds ?? null,
       isBuy: name === 'TokenPurchase', ts: Date.now(),
     });
   }
+}
+
+/**
+ * 毕业后成交：一条动态订阅覆盖所有 active 且已建池的池子。
+ * pools: [{ address, token, quote, quoteSym, quoteDecimals, poolType, quoteIsToken0 }]
+ * onSwap 收到归一化的成交：{ chain, address, account, side, quoteHuman, quoteSym, tokenHuman, ts }
+ * 触发重建的时机只有两个：setPool（新毕业）与归档，频率极低。
+ */
+export function resubscribeSwaps(chain, pools, onSwap) {
+  const client = wsClient(chain);
+  if (!pools.length) return () => {};
+  const meta = new Map(pools.map((p) => [p.address.toLowerCase(), p]));
+  const un = client.watchEvent({
+    address: pools.map((p) => p.address),
+    events: swapEvents,
+    strict: false,
+    onLogs: (logs) => {
+      recordWsLog(chain);
+      for (const l of logs) {
+        try {
+          const p = meta.get((l.address || '').toLowerCase());
+          if (!p) continue;
+          const norm = normalizeSwap(l, p, chain);
+          if (norm) onSwap(norm);
+        } catch (e) { log.debug({ err: e.message }, 'swap 解码失败'); }
+      }
+    },
+    onError: (e) => { recordRpcError(); log.warn({ chain, err: e.message }, 'swap 订阅错误(自动重连)'); },
+  });
+  log.info({ chain, pools: pools.length }, '重建毕业池成交订阅(单订阅)');
+  return un;
+}
+
+function normalizeSwap(l, p, chain) {
+  const a = l.args || {};
+  const qDec = p.quoteDecimals || 18;
+  const q0 = p.quoteIsToken0;
+  let side, quoteRaw, tokenRaw, account;
+  if (p.poolType === 'v3') {
+    // int256 delta：>0 表示池子收到该币（用户卖出该币给池子）
+    const qDelta = q0 ? a.amount0 : a.amount1;
+    const tDelta = q0 ? a.amount1 : a.amount0;
+    if (qDelta == null || tDelta == null) return null;
+    account = a.recipient || null;
+    if (qDelta > 0n) { side = 'buy'; quoteRaw = qDelta; tokenRaw = -tDelta; }
+    else { side = 'sell'; quoteRaw = -qDelta; tokenRaw = tDelta; }
+  } else {
+    // V2：以 amountIn/Out 判断方向
+    const qIn = q0 ? a.amount0In : a.amount1In;
+    const qOut = q0 ? a.amount0Out : a.amount1Out;
+    const tIn = q0 ? a.amount1In : a.amount0In;
+    const tOut = q0 ? a.amount1Out : a.amount0Out;
+    if (qIn == null || qOut == null) return null;
+    account = a.to || null;
+    if (qIn > 0n) { side = 'buy'; quoteRaw = qIn; tokenRaw = tOut; }
+    else { side = 'sell'; quoteRaw = qOut; tokenRaw = tIn; }
+  }
+  if (quoteRaw <= 0n) return null;
+  const quoteHuman = Number(formatUnits(quoteRaw, qDec));
+  const tokenHuman = Number(formatUnits(tokenRaw > 0n ? tokenRaw : 0n, p.tokenDecimals || 18));
+  return { chain, address: p.token, account, side, quoteHuman, quoteSym: p.quoteSym, tokenHuman, ts: Date.now() };
 }
