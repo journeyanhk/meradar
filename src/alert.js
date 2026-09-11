@@ -33,8 +33,11 @@ export function evaluateTier(cand, m) {
 
   if (m.listing) return 'T3';
 
+  // 纯体量的老曲线币（大市值+大深度但无实时动量）只停在 T1，避免换库/换 VPS 时
+  // 回填拉进来的一批 $6–8M 老币启动即 T2、一次性刷屏强提示。
+  const hasMomentum = (m.netIn30m || 0) > 0 || (m.newBuyers30m || 0) >= (T.T2.momentumMinNewBuyers30m || 10);
   const t2 =
-    (m.marketCapUsd >= T.T2.marketCapUsd * k && m.liquidityUsd >= T.T2.minLiquidityUsd * k) ||
+    (m.marketCapUsd >= T.T2.marketCapUsd * k && m.liquidityUsd >= T.T2.minLiquidityUsd * k && hasMomentum) ||
     (m.isOriginal && m.copycats >= T.T2.copycatCount) ||
     m.graduated; // 毕业到 Pancake 归入 T2 强提示
   if (t2) return 'T2';

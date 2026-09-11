@@ -67,6 +67,8 @@ SSE 走 Caddy 无需额外配置。systemd 见 `meradar.service.example`。
 - 事件签名的 `topic0` 已用 `viem.toEventSelector` 对照真实链上日志核验（见 `test/unit.test.js`）；若 Four.meme 升级合约改了事件，替换 `src/abi.js` 的签名即可。
 - 貔貅 `getAmountsOut` 往返只反映定价/滑点，**不含 transfer 税**；transfer 税由 GoPlus 卖出税字段兜底，深度税检测（`eth_call` + stateOverride 真实 swap）为后续项。
 - 启动自检会用一次窄范围 `eth_getLogs`（带发射台地址）验证毕业池定价可用；若 RPC 封禁则只影响毕业池的精确定价，曲线期监控不受影响。
+- **毕业后成交（Swap）单订阅**：一条订阅、地址数组 + V2/V3 双 `topic0` 覆盖所有已毕业活跃池，`setPool`/归档时整体重建。V2 `Swap` 的买家取事件里的 `to`，对**经 GMGN 机器人或聚合器**的买入，`to` 是路由/机器人合约而非真实钱包——这类买入会被归到同一地址，因此**毕业后的「新买家」数会略偏低**；曲线期直接用 `TokenPurchase.account`，不受影响。
+- **净流入/最大单笔/买卖比/新买家** 全部来自 `trades` 表（仅落 active 币，30 天清理），`quote_amount` 统一按美元计价，跨报价币（BNB/USDT）可直接求和。`buyers` 表在 promote 时整体落库、`first_ts` 记 0，此后增量才用真实时间，避免升级后 30 分钟内「新买家」虚高为全部买家。
 
 ## 架构
 

@@ -1,5 +1,5 @@
 import { watchChain, resubscribeSwaps } from './discover.js';
-import { readToken, getBnbUsd, quoteUsd } from './enrich.js';
+import { readToken, getBnbUsd, quoteUsd, resolveQuote } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { store } from './db.js';
 import { config, chainConfig } from './config.js';
@@ -38,6 +38,7 @@ async function onCreate(c) {
     decimals: 18, // Four.meme 曲线代币固定 18 位
     total_supply: c.totalSupply != null ? c.totalSupply.toString() : null,
     creator: c.creator || null, pool: null, pool_type: null, quote_symbol: null,
+    launch_time: c.launchTime != null ? Number(c.launchTime) * 1000 : null,
     status: 'seen', discovered_at: now, updated_at: now,
   });
   if (!inserted) return;
@@ -88,9 +89,10 @@ async function onTrade(t) {
   if (!store.promote(key)) return;
   recordPromoted();
 
-  // promote 那一刻把内存买家集合整体落库；此后增量 INSERT OR IGNORE
-  const dumpTs = Date.now();
-  for (const acc of momentum.buyers(t.address)) store.addBuyer(key, acc, dumpTs);
+  // promote 那一刻把内存买家集合整体落库；first_ts 写 0，使这批「已存量」买家不被
+  // newBuyers30m(first_ts>=since) 计入，避免升级后 30 分钟内「新买家」虚高为全部买家。
+  // 此后真正的增量买入(recordCurveTrade/onSwap)用真实 ts 落库，才算新买家。
+  for (const acc of momentum.buyers(t.address)) store.addBuyer(key, acc, 0);
 
   // 元数据兜底：若创建事件缺 symbol，补一次链上读取（仅此刻，一次性）
   let fresh = store.get(key);
@@ -180,7 +182,9 @@ async function onAmm(c) {
   const existing = store.get(key);
   if (!existing) return; // 未登记的 AMM 新对不追（噪声太多，只关心已发现的曲线币毕业）
   if (existing.pool) return;
-  store.setPool(key, c.pool, c.poolType, c.quote);
+  // quote_symbol 统一存符号：PairCreated 给的是地址，先解析成符号再落库
+  const q = resolveQuote(chainConfig(c.chain), c.quote);
+  store.setPool(key, c.pool, c.poolType, q?.sym ?? null);
   log.info({ token: existing.symbol, pool: c.pool }, '候选建池/毕业，已补池子');
   bus.emit(Events.POOLS_CHANGED, { chain: c.chain });
   bus.emit(Events.UPDATE, { ...store.get(key) });
@@ -193,11 +197,12 @@ function rebuildSwaps(chain) {
   const pools = store.swapPools()
     .filter((r) => r.chain === chain && r.pool)
     .map((r) => {
-      const q = cfg.quoteTokens[r.quote_symbol] || {};
+      // resolveQuote 同时吃符号和历史遗留的地址值，两种存法都能解析
+      const q = resolveQuote(cfg, r.quote_symbol) || {};
       const quoteAddr = (q.address || '').toLowerCase();
       const tokenAddr = r.address.toLowerCase();
       return {
-        address: r.pool, token: r.address, quote: quoteAddr, quoteSym: r.quote_symbol,
+        address: r.pool, token: r.address, quote: quoteAddr, quoteSym: q.sym || r.quote_symbol,
         quoteDecimals: q.decimals || 18, tokenDecimals: r.decimals || 18,
         poolType: r.pool_type === 'v3' ? 'v3' : 'v2',
         quoteIsToken0: quoteAddr ? quoteAddr < tokenAddr : false,
@@ -221,6 +226,7 @@ export async function backfillRecentCreates(chain, hours = 2) {
   let latest;
   try { latest = await client.getBlockNumber(); } catch (e) { log.warn({ chain, err: e.message }, '回填取块高失败'); return 0; }
   const blocksPerHour = Math.round(3600 / 0.45); // BSC ~0.45s/块
+  const nowMs = Date.now();
   const span = BigInt(blocksPerHour * hours);
   const chunk = 4000n; // 分段，规避公共 RPC 单次日志范围上限
   let from = latest > span ? latest - span : 0n;
@@ -244,16 +250,20 @@ export async function backfillRecentCreates(chain, hours = 2) {
         await onCreate({
           chain, address: a.token, launchpad: lp.id, label: lp.label,
           creator: a.creator || null, name: a.name || null, symbol: a.symbol || null,
-          totalSupply: a.totalSupply ?? null, tx: l.transactionHash, block: Number(l.blockNumber || 0),
+          totalSupply: a.totalSupply ?? null, launchTime: a.launchTime ?? null,
+          tx: l.transactionHash, block: Number(l.blockNumber || 0),
         }).catch(() => {});
         count++;
       } else if (l.eventName === 'TokenPurchase' || l.eventName === 'TokenSale') {
-        // 回填期把历史买卖也喂进动量：累积买家数，使启动后首笔实时买入即可触发升级
+        // 回填期把历史买卖也喂进动量：累积买家数，使启动后首笔实时买入即可触发升级。
+        // ts 用块高估算(BSC ~450ms/块)，避免历史成交在重启后 30 分钟内虚增 buys30m。
         if (!a.token) continue;
+        const bn = l.blockNumber != null ? BigInt(l.blockNumber) : latest;
+        const ts = nowMs - Number(latest - bn) * 450;
         momentum.onTrade({
           token: a.token, account: a.account || null, price: a.price ?? null,
           cost: a.cost ?? null, funds: a.funds ?? null, offers: a.offers ?? null,
-          isBuy: l.eventName === 'TokenPurchase', ts: Date.now(),
+          isBuy: l.eventName === 'TokenPurchase', ts,
         });
       }
     }

@@ -112,8 +112,8 @@ ensureColumns('candidates', [
 
 const stmt = {
   upsertCandidate: db.prepare(`
-    INSERT INTO candidates (key, chain, address, launchpad, name, symbol, decimals, total_supply, creator, pool, pool_type, quote_symbol, status, discovered_at, updated_at)
-    VALUES (@key, @chain, @address, @launchpad, @name, @symbol, @decimals, @total_supply, @creator, @pool, @pool_type, @quote_symbol, @status, @discovered_at, @updated_at)
+    INSERT INTO candidates (key, chain, address, launchpad, name, symbol, decimals, total_supply, creator, pool, pool_type, quote_symbol, launch_time, status, discovered_at, updated_at)
+    VALUES (@key, @chain, @address, @launchpad, @name, @symbol, @decimals, @total_supply, @creator, @pool, @pool_type, @quote_symbol, @launch_time, @status, @discovered_at, @updated_at)
     ON CONFLICT(key) DO NOTHING
   `),
   getCandidate: db.prepare(`SELECT * FROM candidates WHERE key = ?`),
@@ -173,7 +173,7 @@ const stmt = {
       MAX(CASE WHEN ts>=@t10 AND side='buy' THEN quote_amount ELSE 0 END) AS maxBuy10,
       SUM(CASE WHEN ts>=@t30 AND side='buy' THEN quote_amount ELSE 0 END) AS buy30,
       SUM(CASE WHEN ts>=@t30 AND side='sell' THEN quote_amount ELSE 0 END) AS sell30
-    FROM trades WHERE key=@key
+    FROM trades WHERE key=@key AND ts>=@t1h
   `),
   newBuyers30m: db.prepare(`SELECT COUNT(*) AS n FROM buyers WHERE key=@key AND first_ts>=@since`),
   insertBuyer: db.prepare(`INSERT OR IGNORE INTO buyers (key, account, first_ts) VALUES (@key, @account, @first_ts)`),
@@ -183,7 +183,7 @@ const stmt = {
 
 export const store = {
   raw: db,
-  addCandidate(c) { return stmt.upsertCandidate.run(c).changes > 0; },
+  addCandidate(c) { return stmt.upsertCandidate.run({ launch_time: null, ...c }).changes > 0; },
   get(key) { return stmt.getCandidate.get(key); },
   enrich(key, data) { stmt.updateEnrich.run({ key, updated_at: Date.now(), ...data }); },
   setPool(key, pool, pool_type, quote) { stmt.setPool.run({ key, pool, pool_type, quote, updated_at: Date.now() }); },

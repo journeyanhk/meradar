@@ -94,7 +94,7 @@ function routeFourMeme(chain, lp, l, handlers) {
     handlers.onCreate?.({
       chain, address: a.token, launchpad: lp.id, label: lp.label,
       creator: a.creator || null, name: a.name || null, symbol: a.symbol || null,
-      totalSupply: a.totalSupply ?? null,
+      totalSupply: a.totalSupply ?? null, launchTime: a.launchTime ?? null,
       tx: l.transactionHash, block: Number(l.blockNumber || 0),
     });
   } else if (name === 'TokenPurchase' || name === 'TokenSale') {
@@ -140,7 +140,7 @@ export function resubscribeSwaps(chain, pools, onSwap) {
   return un;
 }
 
-function normalizeSwap(l, p, chain) {
+export function normalizeSwap(l, p, chain) {
   const a = l.args || {};
   const qDec = p.quoteDecimals || 18;
   const q0 = p.quoteIsToken0;

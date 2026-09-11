@@ -29,7 +29,8 @@
     "T2": {
       "marketCapUsd": 500000,
       "minLiquidityUsd": 50000,
-      "copycatCount": 3
+      "copycatCount": 3,
+      "momentumMinNewBuyers30m": 10
     },
     "narrativeMultiplier": 0.5
   },
