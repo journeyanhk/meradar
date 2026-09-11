@@ -55,14 +55,15 @@ async function main() {
     if (removed) logger.debug({ removed }, '清理过期快照');
   }, 3600_000);
 
-  // seen 清理：登记超 24h 仍无动量升级的候选归档，并释放内存动量状态，防止只增不减
+  // seen 清理：登记超 24h 仍无动量升级的候选直接删除（本就是噪声），并释放内存动量状态。
+  // 关键：必须删除而非归档——归档后行仍存在，懒注册会因「行已存在」跳过它，
+  // 导致「发行超 24h 才启动」的慢热币被永久忽略；删除后其首次买入会重新懒注册。
   function cleanupStaleSeen() {
-    const stale = store.staleSeen(Date.now() - 24 * 3600 * 1000);
-    for (const s of stale) {
-      store.setStatus(s.key, 'archived', 'seen 超 24h 无动量');
-      momentum.forget(s.address);
-    }
-    if (stale.length) logger.debug({ archived: stale.length }, '归档陈旧 seen 候选');
+    const cutoff = Date.now() - 24 * 3600 * 1000;
+    const stale = store.staleSeen(cutoff);
+    for (const s of stale) momentum.forget(s.address);
+    const removed = store.deleteStaleSeen(cutoff);
+    if (removed) logger.debug({ removed }, '删除陈旧 seen 候选(允许日后懒注册重登记)');
   }
   setInterval(cleanupStaleSeen, 3600_000);
 

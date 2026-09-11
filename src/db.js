@@ -1,11 +1,11 @@
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT } from './config.js';
 
 mkdirSync(join(ROOT, 'data'), { recursive: true });
-const db = new Database(join(ROOT, 'data', 'meradar.sqlite'));
-db.pragma('journal_mode = WAL');
+const db = new DatabaseSync(join(ROOT, 'data', 'meradar.sqlite'));
+db.exec('PRAGMA journal_mode = WAL');
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS candidates (
@@ -100,6 +100,7 @@ const stmt = {
   countCreator: db.prepare(`SELECT COUNT(*) AS n FROM candidates WHERE chain=? AND creator=? AND discovered_at >= ?`),
   earliestSameSymbol: db.prepare(`SELECT key, discovered_at FROM candidates WHERE chain=? AND symbol=? ORDER BY discovered_at ASC LIMIT 1`),
   staleSeen: db.prepare(`SELECT key, address FROM candidates WHERE status='seen' AND discovered_at < ? LIMIT 5000`),
+  deleteStaleSeen: db.prepare(`DELETE FROM candidates WHERE status='seen' AND discovered_at < ?`),
   activeCandidates: db.prepare(`SELECT * FROM candidates WHERE status='active' ORDER BY (tier='T3') DESC, (tier='T2') DESC, updated_at DESC LIMIT ?`),
   listFeed: db.prepare(`
     SELECT * FROM candidates WHERE status IN ('active','archived','rejected')
@@ -140,6 +141,7 @@ export const store = {
   countCreatorSince(chain, creator, sinceMs) { return stmt.countCreator.get(chain, creator, sinceMs).n; },
   earliestSameSymbol(chain, symbol) { return stmt.earliestSameSymbol.get(chain, symbol); },
   staleSeen(beforeMs) { return stmt.staleSeen.all(beforeMs); },
+  deleteStaleSeen(beforeMs) { return stmt.deleteStaleSeen.run(beforeMs).changes; },
   activeCandidates(limit = 400) { return stmt.activeCandidates.all(limit); },
   feed(limit = 200) { return stmt.listFeed.all(limit); },
   stats(since24h) { return { ...stmt.stats.get(since24h), missed: stmt.missedKills.get().missed }; },

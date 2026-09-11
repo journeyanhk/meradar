@@ -10,7 +10,7 @@ Wants=network-online.target
 Type=simple
 User=meradar
 WorkingDirectory=/opt/meradar
-ExecStart=/usr/bin/node src/index.js
+ExecStart=/usr/bin/node --no-warnings=ExperimentalWarning src/index.js
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production

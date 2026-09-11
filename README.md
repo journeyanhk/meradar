@@ -17,9 +17,11 @@
 
 ## 快速开始
 
+> **要求 Node ≥ 22.13**：存储用 Node 内置 `node:sqlite`（无原生编译、无 `node-gyp`、换机器/升级都不会再遇到 `better_sqlite3.node` 找不到的报错）。
+
 ```bash
 git clone <repo> && cd meradar
-npm install
+npm install               # 纯 JS 依赖，无需 build-essential/python3
 cp .env.example .env      # 按下方填写
 npm start                 # 默认 http://127.0.0.1:8787
 ```

@@ -5,16 +5,15 @@
   "type": "module",
   "description": "Meme 雷达 — 只读监控 BSC/Four.meme 新币，跟踪动量并分级告警 (Telegram + Server酱)。Arc 适配器待命。",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13"
   },
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
-    "test": "node --test"
+    "start": "node --no-warnings=ExperimentalWarning src/index.js",
+    "dev": "node --watch --no-warnings=ExperimentalWarning src/index.js",
+    "test": "node --no-warnings=ExperimentalWarning --test"
   },
   "dependencies": {
     "@fastify/static": "^7.0.4",
-    "better-sqlite3": "^11.3.0",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
     "pino": "^9.4.0",
