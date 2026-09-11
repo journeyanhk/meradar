@@ -1,9 +1,9 @@
-import { readPoolMetrics, getBnbUsd } from './enrich.js';
+import { readPoolMetrics, resolveQuote, quoteUsd } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { narrativeHit, copycatCount } from './narrative.js';
 import { maybeAlert } from './alert.js';
 import { store } from './db.js';
-import { config } from './config.js';
+import { config, chainConfig } from './config.js';
 import { bus, Events } from './bus.js';
 import * as momentum from './momentum.js';
 import { child } from './logger.js';
@@ -20,7 +20,11 @@ function supplyHuman(cand) {
 // 对单个候选跑一次跟踪
 export async function pollCandidate(chain, cand) {
   const token = cand.address;
-  const bnbUsd = getBnbUsd(chain);
+  const cfg = chainConfig(chain);
+  // 报价币：BNB(0x0→WBNB)/USDT/USD1/… 各不相同。解析不到(未知报价币)则不定价，避免按 BNB 猜。
+  const q = resolveQuote(cfg, cand.quote_symbol);
+  const quotePriceUsd = q ? quoteUsd(chain, q.sym) : null;
+  const quoteDec = q?.decimals || 18;
 
   // 毕业后拿到池子才可做 getAmountsOut 往返，补一次安全打分
   if (cand.pool && !hasHoneypotCheck(cand)) {
@@ -34,7 +38,7 @@ export async function pollCandidate(chain, cand) {
   }
 
   // 曲线期指标来自内存事件流（零 RPC）；毕业后用池子真实储备
-  const curve = momentum.curveMetrics(token, supplyHuman(cand), bnbUsd);
+  const curve = momentum.curveMetrics(token, supplyHuman(cand), quotePriceUsd, quoteDec);
   let poolM = null;
   if (cand.pool && cand.quote_symbol) {
     poolM = await readPoolMetrics(chain, {
@@ -51,11 +55,16 @@ export async function pollCandidate(chain, cand) {
   const hits = narrativeHit(cand.name, cand.symbol);
   const copycats = cand.copy_of ? 0 : copycatCount(chain, cand.symbol); // 仅原版累计仿盘热度
 
-  // 深度：曲线期=募集额(funds×BNB)，毕业后=池储备。单字段承载，depth_kind 标记来源。
+  // 深度：曲线期=募集额(funds×报价币美元价，已在 curveMetrics 换算)，毕业后=池储备。
   let depthUsd, depthKind;
   if (cand.pool && poolM) { depthUsd = poolM.liquidityUsd || prev?.depth_usd || 0; depthKind = 'amm'; }
-  else { depthUsd = (curve?.fundsBnb || 0) * bnbUsd || prev?.depth_usd || 0; depthKind = 'curve'; }
+  else { depthUsd = curve?.fundsUsd || prev?.depth_usd || 0; depthKind = 'curve'; }
   const offersPct = curve?.offersPct ?? prev?.offers_pct ?? 0;
+  // 曲线毕业进度 = funds / maxRaising（同为报价币单位，比值与小数位无关），比「剩余%」直观。
+  const maxRaisingHuman = cand.max_raising ? Number(cand.max_raising) / (10 ** quoteDec) : 0;
+  const curveProgressPct = (!cand.pool && maxRaisingHuman > 0 && curve)
+    ? Math.min(100, (curve.fundsQuote / maxRaisingHuman) * 100)
+    : (prev?.curve_progress_pct ?? 0);
 
   // 净流入/最大单笔/买卖比/新买家 —— 全部一句 SQL 取自 trades 表
   const flow = store.tradeFlow(cand.key);
@@ -65,6 +74,7 @@ export async function pollCandidate(chain, cand) {
     depthUsd,
     depthKind,
     offersPct,
+    curveProgressPct,
     priceUsd: poolM?.priceUsd || curve?.priceUsd || prev?.price_usd || 0,
     marketCapUsd: poolM?.marketCapUsd || curve?.marketCapUsd || prev?.market_cap_usd || 0,
     volumeUsd: curve?.volumeUsd || prev?.volume_usd || 0,
@@ -96,6 +106,7 @@ export async function pollCandidate(chain, cand) {
     depth_usd: depthUsd,
     depth_kind: depthKind,
     offers_pct: offersPct,
+    curve_progress_pct: curveProgressPct,
     net_in_30m: flow.net30,
     net_in_1h: flow.net1h,
     max_buy_10m: flow.maxBuy10,
@@ -138,11 +149,12 @@ async function runPool(items, limit, worker) {
 // 用免费事件流刷新所有动量币的峰值市值（含 rejected），供漏杀率统计
 function refreshPeaks(sinceMs) {
   const rows = store.raw.prepare(
-    `SELECT key, chain, address, total_supply, decimals FROM candidates WHERE discovered_at > ? AND status != 'archived'`,
+    `SELECT key, chain, address, total_supply, decimals, quote_symbol FROM candidates WHERE discovered_at > ? AND status != 'archived'`,
   ).all(sinceMs);
   for (const r of rows) {
-    const bnbUsd = getBnbUsd(r.chain);
-    const m = momentum.curveMetrics(r.address, supplyHuman(r), bnbUsd);
+    const q = resolveQuote(chainConfig(r.chain), r.quote_symbol);
+    if (!q) continue; // 未知/未解析报价币 → 不定价，避免污染峰值
+    const m = momentum.curveMetrics(r.address, supplyHuman(r), quoteUsd(r.chain, q.sym), q.decimals);
     if (m && m.marketCapUsd > 0) store.updatePeak(r.key, m.marketCapUsd);
   }
 }

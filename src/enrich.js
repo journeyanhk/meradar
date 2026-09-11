@@ -1,6 +1,6 @@
 import { getAddress, formatUnits } from 'viem';
 import { httpClient } from './chain.js';
-import { erc20Abi, pairAbi, v3PoolAbi } from './abi.js';
+import { erc20Abi, pairAbi, v3PoolAbi, tokenManagerAbi } from './abi.js';
 import { chainConfig } from './config.js';
 import { recordRpcError } from './health.js';
 import { child } from './logger.js';
@@ -28,6 +28,50 @@ export async function readToken(chain, address) {
   }
 }
 
+// 读取 Four.meme Token Manager 的 _tokenInfos，解析每个代币的曲线报价币/毕业阈值/募集额。
+// tokens: string[]（代币地址）。返回 Map(tokenLower -> { quoteSym, quoteAddr, quoteDecimals,
+//   maxRaisingRaw:bigint, launchTimeMs:number|null, fundsRaw:bigint, lastPriceRaw:bigint })。
+// 未识别的报价币 quoteSym='UNKNOWN'（调用方据此不定价、不落库，卡片标黄）。读取失败的代币不入 Map。
+export async function readTokenInfos(chain, tokenManager, tokens) {
+  if (!tokenManager || !tokens?.length) return new Map();
+  const cfg = chainConfig(chain);
+  const client = httpClient(chain);
+  const out = new Map();
+  try {
+    const res = await client.multicall({
+      allowFailure: true,
+      contracts: tokens.map((t) => ({ address: tokenManager, abi: tokenManagerAbi, functionName: '_tokenInfos', args: [t] })),
+    });
+    for (let i = 0; i < res.length; i++) {
+      const r = res[i];
+      if (r?.status !== 'success' || !r.result) continue;
+      const info = r.result; // [base, quote, template, totalSupply, maxOffers, maxRaising, launchTime, offers, funds, lastPrice, K, T, status]
+      const quoteAddr = info[1];
+      const q = resolveQuote(cfg, quoteAddr);
+      const launchSec = Number(info[6] || 0n);
+      out.set(tokens[i].toLowerCase(), {
+        quoteSym: q?.sym ?? 'UNKNOWN',
+        quoteAddr: q?.address ?? quoteAddr,
+        quoteDecimals: q?.decimals ?? 18,
+        maxRaisingRaw: info[5] ?? 0n,
+        launchTimeMs: launchSec > 0 ? launchSec * 1000 : null,
+        fundsRaw: info[8] ?? 0n,
+        lastPriceRaw: info[9] ?? 0n,
+      });
+    }
+  } catch (e) {
+    recordRpcError();
+    log.warn({ chain, err: e.message }, 'readTokenInfos 失败');
+  }
+  return out;
+}
+
+// 单个代币的便捷封装（promote 时用），解析不到返回 null。
+export async function readTokenInfo(chain, tokenManager, token) {
+  const m = await readTokenInfos(chain, tokenManager, [token]);
+  return m.get(token.toLowerCase()) || null;
+}
+
 export async function readCreator(chain, tx) {
   if (!tx) return null;
   try {
@@ -39,10 +83,15 @@ export async function readCreator(chain, tx) {
 }
 
 // 统一解析报价币：既能吃符号(WBNB)也能吃地址(0xbb4c…)，历史库里两种都出现过。
-// 返回 { sym, address, decimals }，解析不了返回 null。
+// 特例：Four.meme 的 BNB 曲线报价币是零地址(0x0)，映射到 WBNB(价格=BNB 现价，18 位)。
+// 返回 { sym, address, decimals }，解析不了返回 null（未知报价币，调用方应跳过定价）。
 export function resolveQuote(cfg, symOrAddr) {
   if (!symOrAddr) return null;
   const s = String(symOrAddr).toLowerCase();
+  if (/^0x0+$/.test(s)) {
+    const w = cfg.quoteTokens.WBNB;
+    return w ? { sym: 'WBNB', address: w.address, decimals: w.decimals } : null;
+  }
   for (const [sym, q] of Object.entries(cfg.quoteTokens)) {
     if (sym === symOrAddr || q.address.toLowerCase() === s) {
       return { sym, address: q.address, decimals: q.decimals };
@@ -52,7 +101,7 @@ export function resolveQuote(cfg, symOrAddr) {
 }
 
 function quoteUsdPrice(chain, cfg, sym) {
-  if (sym === 'USDT' || sym === 'USDC' || sym === 'BUSD') return 1;
+  if (sym === 'USDT' || sym === 'USDC' || sym === 'BUSD' || sym === 'USD1') return 1;
   if (sym === 'WBNB') return bnbUsdCache.get(chain) || cfg.wbnbUsdPriceFallback || 900;
   return cfg.wbnbUsdPriceFallback || 1;
 }

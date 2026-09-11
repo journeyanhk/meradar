@@ -77,8 +77,10 @@ function signed(n) {
 function depthLabel(d) {
   const val = usd(d.depthUsd || d.liquidityUsd || 0);
   if (d.depthKind === 'amm') return `流动性 <b>${val}</b>`;
-  const rem = d.offersPct != null ? ` · 剩余${(+d.offersPct).toFixed(0)}%` : '';
-  return `曲线募集 <b>${val}</b>${rem}`;
+  const qs = d.quoteSymbol && d.quoteSymbol !== 'UNKNOWN' ? ` <small>${esc(d.quoteSymbol)}</small>` : '';
+  // 曲线期：显示募集额 + 毕业进度(funds/maxRaising)，比「剩余供应%」直观
+  const prog = d.curveProgressPct != null && d.curveProgressPct > 0 ? ` · 进度${(+d.curveProgressPct).toFixed(0)}%` : '';
+  return `曲线募集 <b>${val}</b>${qs}${prog}`;
 }
 
 function cardHtml(d) {

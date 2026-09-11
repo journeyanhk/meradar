@@ -5,6 +5,7 @@ import { fourMemeEvents } from '../src/abi.js';
 import { evaluateTier } from '../src/alert.js';
 import { resolveQuote } from '../src/enrich.js';
 import { normalizeSwap } from '../src/discover.js';
+import * as momentum from '../src/momentum.js';
 
 // —— 1. Four.meme 事件签名的 topic0 必须与真实链上日志一致 ——
 // 这些 topic0 来自实际观测（见 review 报告）。类型排错会导致 selector 变化。
@@ -95,6 +96,42 @@ test('resolveQuote：符号与地址等价、大小写无关', () => {
   assert.equal(bySym.decimals, 18);
   assert.equal(resolveQuote(qcfg, '0xdeadbeef'), null);
   assert.equal(resolveQuote(qcfg, null), null);
+});
+
+test('resolveQuote：零地址(Four.meme BNB 曲线) 映射到 WBNB', () => {
+  const z = resolveQuote(qcfg, '0x0000000000000000000000000000000000000000');
+  assert.equal(z.sym, 'WBNB');
+  assert.equal(z.decimals, 18);
+});
+
+// —— curveMetrics：报价币定价（市值差 700 倍根因回归） ——
+// USDT 曲线的 lastPrice/funds 单位是 USDT，绝不能乘以 BNB 现价。
+test('curveMetrics USDT 曲线：市值按 USDT 计价而非 BNB', () => {
+  const token = '0x00000000000000000000000000000000000000a1';
+  // BINANCE HOMER 链上实测：lastPrice=3.907e13(raw,18位) => 3.907e-5 USDT/枚
+  momentum.onTrade({ token, account: '0xbuyer', price: 39070000000000n, cost: 100n * 10n ** 18n, funds: 9021n * 10n ** 18n, offers: 0n, isBuy: true, ts: Date.now() });
+  const supply = 1e9; // 10 亿枚
+  const m = momentum.curveMetrics(token, supply, 1 /* USDT=$1 */, 18);
+  assert.ok(Math.abs(m.marketCapUsd - 39070) < 50, `市值应≈$39,070，实得 ${m.marketCapUsd}`);
+  assert.ok(Math.abs(m.fundsUsd - 9021) < 1, `募集应≈$9,021，实得 ${m.fundsUsd}`);
+  // 若误按 BNB(~$700)计价会得到 ~$27M，这里断言远低于该量级
+  assert.ok(m.marketCapUsd < 1e6, '不应被放大到百万级(BNB 误算)');
+});
+
+test('curveMetrics BNB 曲线：同 lastPrice 下乘以 BNB 现价', () => {
+  const token = '0x00000000000000000000000000000000000000b2';
+  momentum.onTrade({ token, account: '0xbuyer', price: 5740000000n /* 5.74e-9 BNB/枚 */, cost: 1n * 10n ** 18n, funds: 5n * 10n ** 18n, offers: 0n, isBuy: true, ts: Date.now() });
+  const m = momentum.curveMetrics(token, 1e9, 700 /* BNB=$700 */, 18);
+  assert.ok(Math.abs(m.marketCapUsd - 4018) < 50, `市值应≈$4,018，实得 ${m.marketCapUsd}`);
+});
+
+test('curveMetrics 未知报价币：不定价(0)但仍计买家', () => {
+  const token = '0x00000000000000000000000000000000000000c3';
+  momentum.onTrade({ token, account: '0xbuyer', price: 39070000000000n, cost: 100n * 10n ** 18n, funds: 9021n * 10n ** 18n, offers: 0n, isBuy: true, ts: Date.now() });
+  const m = momentum.curveMetrics(token, 1e9, null /* 未知报价币 */, 18);
+  assert.equal(m.marketCapUsd, 0);
+  assert.equal(m.fundsUsd, 0);
+  assert.equal(m.uniqueBuyers, 1);
 });
 
 // —— 4. normalizeSwap：D3-A′ 核心买卖方向判定，V2/V3 × 买/卖 × token0/token1 排序 ——

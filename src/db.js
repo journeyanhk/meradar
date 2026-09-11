@@ -108,6 +108,8 @@ ensureColumns('candidates', [
   ['max_buy_10m', 'max_buy_10m REAL DEFAULT 0'],
   ['buy_ratio_30m', 'buy_ratio_30m REAL DEFAULT 0'],
   ['new_buyers_30m', 'new_buyers_30m INTEGER DEFAULT 0'],
+  ['max_raising', 'max_raising TEXT'],                 // 毕业阈值(报价币最小单位, raw)；曲线进度=funds/maxRaising
+  ['curve_progress_pct', 'curve_progress_pct REAL DEFAULT 0'],
 ]);
 
 const stmt = {
@@ -122,6 +124,8 @@ const stmt = {
       creator=@creator, updated_at=@updated_at WHERE key=@key
   `),
   setPool: db.prepare(`UPDATE candidates SET pool=@pool, pool_type=@pool_type, quote_symbol=COALESCE(quote_symbol,@quote), graduated=1, updated_at=@updated_at WHERE key=@key`),
+  // 曲线期报价币信息：quote_symbol 不覆盖已有值(毕业池可能已写)，max_raising/launch_time 补空。
+  setCurveInfo: db.prepare(`UPDATE candidates SET quote_symbol=COALESCE(quote_symbol,@quote_symbol), max_raising=COALESCE(@max_raising,max_raising), launch_time=COALESCE(launch_time,@launch_time), updated_at=@updated_at WHERE key=@key`),
   promote: db.prepare(`UPDATE candidates SET status='active', updated_at=@updated_at WHERE key=@key AND status='seen'`),
   setCopyOf: db.prepare(`UPDATE candidates SET copy_of=@copy_of, updated_at=@updated_at WHERE key=@key`),
   updateMetrics: db.prepare(`
@@ -130,7 +134,7 @@ const stmt = {
       narrative_hit=@narrative_hit, graduated=@graduated, peak_mcap_usd=MAX(peak_mcap_usd, @market_cap_usd),
       depth_usd=@depth_usd, depth_kind=@depth_kind, offers_pct=@offers_pct,
       net_in_30m=@net_in_30m, net_in_1h=@net_in_1h, max_buy_10m=@max_buy_10m,
-      buy_ratio_30m=@buy_ratio_30m, new_buyers_30m=@new_buyers_30m,
+      buy_ratio_30m=@buy_ratio_30m, new_buyers_30m=@new_buyers_30m, curve_progress_pct=@curve_progress_pct,
       updated_at=@updated_at WHERE key=@key
   `),
   updatePeak: db.prepare(`UPDATE candidates SET peak_mcap_usd=MAX(peak_mcap_usd, @mcap) WHERE key=@key`),
@@ -187,13 +191,16 @@ export const store = {
   get(key) { return stmt.getCandidate.get(key); },
   enrich(key, data) { stmt.updateEnrich.run({ key, updated_at: Date.now(), ...data }); },
   setPool(key, pool, pool_type, quote) { stmt.setPool.run({ key, pool, pool_type, quote, updated_at: Date.now() }); },
+  setCurveInfo(key, { quote_symbol = null, max_raising = null, launch_time = null }) {
+    stmt.setCurveInfo.run({ key, quote_symbol, max_raising, launch_time, updated_at: Date.now() });
+  },
   promote(key) { return stmt.promote.run({ key, updated_at: Date.now() }).changes > 0; },
   setCopyOf(key, copy_of) { stmt.setCopyOf.run({ key, copy_of, updated_at: Date.now() }); },
   updateMetrics(key, m) {
     stmt.updateMetrics.run({
       key, updated_at: Date.now(),
       volume_usd: 0, depth_usd: 0, depth_kind: 'curve', offers_pct: 0,
-      net_in_30m: 0, net_in_1h: 0, max_buy_10m: 0, buy_ratio_30m: 0, new_buyers_30m: 0,
+      net_in_30m: 0, net_in_1h: 0, max_buy_10m: 0, buy_ratio_30m: 0, new_buyers_30m: 0, curve_progress_pct: 0,
       ...m,
     });
   },

@@ -52,3 +52,11 @@ export const v2FactoryAbi = parseAbi([
 export const v3FactoryAbi = parseAbi([
   'function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)',
 ]);
+
+// Four.meme Token Manager 视图：返回某代币的曲线报价币、毕业阈值、募集额、最新价等。
+// 关键：同一个 Token Manager 上同时跑 BNB(报价=0x0)、USDT、USD1、甚至任意 ERC20 报价的曲线，
+// 事件里的 price/cost/funds 单位都是「该币自己的报价币」；必须靠这个视图拿到报价币才能正确定价。
+// 字段顺序已链上核验(选择器 0xe684626b)：[1]=quote [3]=totalSupply [5]=maxRaising [6]=launchTime [8]=funds [9]=lastPrice。
+export const tokenManagerAbi = parseAbi([
+  'function _tokenInfos(address) view returns (address base, address quote, uint256 template, uint256 totalSupply, uint256 maxOffers, uint256 maxRaising, uint256 launchTime, uint256 offers, uint256 funds, uint256 lastPrice, uint256 K, uint256 T, uint256 status)',
+]);
