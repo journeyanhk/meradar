@@ -1,5 +1,5 @@
 import { watchChain, resubscribeSwaps } from './discover.js';
-import { readToken, getBnbUsd, quoteUsd, resolveQuote } from './enrich.js';
+import { readToken, quoteUsd, resolveQuote, readTokenInfo } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { store } from './db.js';
 import { config, chainConfig } from './config.js';
@@ -14,11 +14,22 @@ import { child } from './logger.js';
 const log = child('engine');
 const V3_FEES = [100, 500, 2500, 10000];
 
-// 曲线期成交落库（USD 计价，仅 active 币）
+// 取某链 Four.meme Token Manager 地址（_tokenInfos 视图所在合约）。
+function tokenManagerAddr(chain) {
+  const cfg = chainConfig(chain);
+  const lp = cfg.launchpads?.find((l) => l.type === 'fourmeme-events' && l.address && !/^0x0+$/.test(l.address));
+  return lp?.address || null;
+}
+
+// 曲线期成交落库（USD 计价，仅 active 币）。
+// 单位换算用「该币自己的报价币」，不再一律按 BNB —— 否则 USDT 曲线会被放大约一个 BNB 价格的倍数。
 function recordCurveTrade(t, cand) {
-  const bnbUsd = getBnbUsd(t.chain);
-  const usd = t.cost != null ? (Number(t.cost) / 1e18) * bnbUsd : 0;
-  const tokenHuman = t.amount != null ? Number(t.amount) / 1e18 : 0;
+  const q = resolveQuote(chainConfig(t.chain), cand.quote_symbol);
+  if (!q) return; // 报价币未知 → 不定价、不落库（宁可晚 10 秒等 _tokenInfos 解析）
+  const qp = quoteUsd(t.chain, q.sym);
+  const div = 10 ** q.decimals;
+  const usd = t.cost != null ? (Number(t.cost) / div) * qp : 0;
+  const tokenHuman = t.amount != null ? Number(t.amount) / 1e18 : 0; // meme 代币固定 18 位
   const side = t.isBuy ? 'buy' : 'sell';
   const ts = t.ts || Date.now();
   store.addTrade({ key: cand.key, ts, side, account: t.account, quote_amount: usd, token_amount: tokenHuman, price: tokenHuman > 0 ? usd / tokenHuman : 0 });
@@ -93,6 +104,21 @@ async function onTrade(t) {
   // newBuyers30m(first_ts>=since) 计入，避免升级后 30 分钟内「新买家」虚高为全部买家。
   // 此后真正的增量买入(recordCurveTrade/onSwap)用真实 ts 落库，才算新买家。
   for (const acc of momentum.buyers(t.address)) store.addBuyer(key, acc, 0);
+
+  // 关键：解析该币的曲线报价币 + 毕业阈值。Four.meme 同一 Token Manager 上跑 BNB/USDT/USD1/任意报价币，
+  // 事件里的 price/cost/funds 都是报价币单位。不读这一次，USDT 曲线会被按 BNB 放大约 700 倍。
+  // 只在 promote 这一刻读一次（低频，仅通过准入的币），后续成交定价直接复用 quote_symbol。
+  const tm = tokenManagerAddr(t.chain);
+  if (tm) {
+    const info = await readTokenInfo(t.chain, tm, t.address).catch(() => null);
+    if (info) {
+      store.setCurveInfo(key, {
+        quote_symbol: info.quoteSym,
+        max_raising: info.maxRaisingRaw != null ? info.maxRaisingRaw.toString() : null,
+        launch_time: info.launchTimeMs,
+      });
+    }
+  }
 
   // 元数据兜底：若创建事件缺 symbol，补一次链上读取（仅此刻，一次性）
   let fresh = store.get(key);

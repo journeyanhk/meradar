@@ -21,6 +21,7 @@ function decorate(c) {
     graduated: !!c.graduated, creator: c.creator,
     liquidityUsd: c.liquidity_usd, priceUsd: c.price_usd, marketCapUsd: c.market_cap_usd,
     depthUsd: c.depth_usd || 0, depthKind: c.depth_kind || 'curve', offersPct: c.offers_pct || 0,
+    curveProgressPct: c.curve_progress_pct || 0, quoteSymbol: c.quote_symbol || null,
     peakMcapUsd: peak, drawdownPct,
     netIn30m: c.net_in_30m || 0, netIn1h: c.net_in_1h || 0,
     maxBuy10m: c.max_buy_10m || 0, buyRatio30m: c.buy_ratio_30m || 0, newBuyers30m: c.new_buyers_30m || 0,
