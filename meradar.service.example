@@ -1,0 +1,21 @@
+# /etc/systemd/system/meradar.service
+# 安装: sudo cp meradar.service.example /etc/systemd/system/meradar.service
+#       sudo systemctl daemon-reload && sudo systemctl enable --now meradar
+[Unit]
+Description=Meme Radar (meradar)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=meradar
+WorkingDirectory=/opt/meradar
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+# .env 会被自动读取；或在此显式声明 EnvironmentFile=
+# EnvironmentFile=/opt/meradar/.env
+
+[Install]
+WantedBy=multi-user.target

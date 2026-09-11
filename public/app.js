@@ -1,0 +1,171 @@
+'use strict';
+
+// ---------- 主题：跟随系统 / 手动切换 ----------
+const root = document.documentElement;
+const saved = localStorage.getItem('theme') || 'auto';
+applyTheme(saved);
+document.getElementById('themeBtn').addEventListener('click', () => {
+  const order = ['auto', 'light', 'dark'];
+  const cur = localStorage.getItem('theme') || 'auto';
+  const next = order[(order.indexOf(cur) + 1) % order.length];
+  localStorage.setItem('theme', next);
+  applyTheme(next);
+});
+function applyTheme(t) {
+  root.setAttribute('data-theme', t);
+  document.getElementById('themeBtn').textContent = t === 'auto' ? '🌓' : t === 'dark' ? '🌙' : '☀️';
+}
+
+// ---------- 状态 ----------
+const feed = document.getElementById('feed');
+const empty = document.getElementById('empty');
+const cards = new Map(); // key -> element
+const state = new Map(); // key -> data
+const filters = { minLiq: 0, t2only: false, pause: false };
+
+document.getElementById('fMinLiq').addEventListener('change', (e) => { filters.minLiq = +e.target.value; render(); });
+document.getElementById('fT2').addEventListener('change', (e) => { filters.t2only = e.target.checked; render(); });
+document.getElementById('fPause').addEventListener('change', (e) => { filters.pause = e.target.checked; });
+
+// ---------- 工具 ----------
+const RANK = { T0: 0, T1: 1, T2: 2, T3: 3 };
+function usd(n) {
+  n = +n || 0;
+  if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+  return '$' + n.toFixed(0);
+}
+function ago(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h';
+  return Math.floor(s / 86400) + 'd';
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+function sparkline(snaps) {
+  if (!snaps || snaps.length < 2) return '';
+  const vals = snaps.map((s) => s.market_cap_usd || s.price_usd || s.unique_buyers || 0);
+  const max = Math.max(...vals), min = Math.min(...vals);
+  const W = 300, H = 34, n = vals.length;
+  const pts = vals.map((v, i) => {
+    const x = (i / (n - 1)) * W;
+    const y = max === min ? H / 2 : H - ((v - min) / (max - min)) * (H - 4) - 2;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const up = vals[vals.length - 1] >= vals[0];
+  const col = up ? 'var(--ok)' : 'var(--t2)';
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><polyline fill="none" stroke="${col}" stroke-width="1.5" points="${pts}"/></svg>`;
+}
+
+function visible(d) {
+  if (d.status === 'rejected') return false;
+  if (filters.t2only && RANK[d.tier] < 2) return false;
+  if ((d.liquidityUsd || 0) < filters.minLiq) return false;
+  return true;
+}
+
+function cardHtml(d) {
+  const tags = [];
+  (d.narrativeHit || []).forEach((h) => tags.push(`<span class="tag">🔥${esc(h)}</span>`));
+  if (d.copycats >= 3) tags.push(`<span class="tag">仿盘${d.copycats}</span>`);
+  const badges = [`<span class="badge ${d.tier}">${d.tier}</span>`];
+  if (d.graduated) badges.push('<span class="badge grad">毕业</span>');
+  const links = Object.entries(d.links || {}).map(([k, v]) => `<a href="${v}" target="_blank" rel="noopener">${k}</a>`).join('');
+  return `
+    <div class="row1">
+      <div><span class="sym">${esc(d.symbol || '?')}</span><span class="name">${esc(d.name || '')}</span></div>
+      <div>${badges.join(' ')}</div>
+    </div>
+    ${tags.length ? `<div class="tags">${tags.join('')}</div>` : ''}
+    <div class="metrics">
+      <span>市值 <b>${usd(d.marketCapUsd)}</b></span>
+      <span>流动性 <b>${usd(d.liquidityUsd)}</b></span>
+      <span>买家 <b>${d.uniqueBuyers || 0}</b></span>
+      <span>${esc(d.launchpad || '')}</span>
+      <span>${ago(d.discoveredAt)}前</span>
+    </div>
+    <div class="spark-holder"></div>
+    <div class="addr">${esc(d.address)}</div>
+    <div class="links">${links}</div>`;
+}
+
+function upsert(d, highlight) {
+  state.set(d.key, d);
+  if (!visible(d)) { removeCard(d.key); return; }
+  empty.style.display = 'none';
+  let el = cards.get(d.key);
+  if (!el) {
+    el = document.createElement('div');
+    cards.set(d.key, el);
+  }
+  el.className = `card ${d.tier}${d.status === 'rejected' ? ' rejected' : ''}`;
+  el.innerHTML = cardHtml(d);
+  // 位置：T2/T3 或高亮的置顶
+  if (!el.parentNode || highlight || RANK[d.tier] >= 2) {
+    if (!filters.pause) feed.prepend(el);
+    else if (!el.parentNode) feed.prepend(el);
+  }
+  fetchSpark(d.key, el);
+}
+
+function removeCard(key) {
+  const el = cards.get(key);
+  if (el && el.parentNode) el.parentNode.removeChild(el);
+  cards.delete(key);
+}
+
+async function fetchSpark(key, el) {
+  try {
+    const r = await fetch('/api/token/' + encodeURIComponent(key));
+    if (!r.ok) return;
+    const d = await r.json();
+    const holder = el.querySelector('.spark-holder');
+    if (holder) holder.innerHTML = sparkline(d.snapshots);
+  } catch { /* noop */ }
+}
+
+function render() {
+  for (const [key, d] of state) {
+    if (visible(d)) upsert(d, false);
+    else removeCard(key);
+  }
+  if (!feed.querySelector('.card')) empty.style.display = 'block';
+}
+
+// ---------- 数据加载 ----------
+async function loadInitial() {
+  try {
+    const r = await fetch('/api/tokens?limit=200');
+    const list = await r.json();
+    list.reverse().forEach((d) => upsert(d, false));
+  } catch { /* noop */ }
+  loadStats();
+}
+async function loadStats() {
+  try {
+    const s = await fetch('/api/stats').then((r) => r.json());
+    document.getElementById('s-total').textContent = s.total ?? 0;
+    document.getElementById('s-24h').textContent = s.last24h ?? 0;
+    document.getElementById('s-t1').textContent = s.t1 ?? 0;
+    document.getElementById('s-t2').textContent = s.t2 ?? 0;
+    document.getElementById('s-t3').textContent = s.t3 ?? 0;
+    document.getElementById('s-missed').textContent = s.missed ?? 0;
+  } catch { /* noop */ }
+}
+
+// ---------- SSE ----------
+const conn = document.getElementById('conn');
+function connect() {
+  const es = new EventSource('/api/stream');
+  es.onopen = () => { conn.className = 'conn on'; };
+  es.onerror = () => { conn.className = 'conn off'; };
+  es.addEventListener('candidate', (e) => upsert(JSON.parse(e.data), true));
+  es.addEventListener('update', (e) => upsert(JSON.parse(e.data), false));
+  es.addEventListener('alert', (e) => { upsert(JSON.parse(e.data), true); loadStats(); });
+}
+
+loadInitial();
+connect();
+setInterval(loadStats, 30000);

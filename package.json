@@ -1,0 +1,22 @@
+{
+  "name": "meradar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Meme 雷达 — 只读监控 BSC/Four.meme 新币，跟踪动量并分级告警 (Telegram + Server酱)。Arc 适配器待命。",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@fastify/static": "^7.0.4",
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.28.1",
+    "pino": "^9.4.0",
+    "viem": "^2.21.19"
+  }
+}

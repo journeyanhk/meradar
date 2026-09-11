@@ -1,0 +1,7 @@
+# Caddy 反向代理示例。放到你的 Caddyfile 里。
+# SSE (/api/stream) 无需额外配置，Caddy 默认不缓冲、支持流式。
+
+radar.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8787
+}
