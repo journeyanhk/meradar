@@ -71,7 +71,8 @@ async function run() {
 
   const resetMetrics = db.prepare(
     `UPDATE candidates SET market_cap_usd=0, depth_usd=0, liquidity_usd=0, peak_mcap_usd=0,
-       net_in_30m=0, net_in_1h=0, max_buy_10m=0, buy_ratio_30m=0, updated_at=@updated_at WHERE key=@key`,
+       net_in_30m=0, net_in_1h=0, max_buy_10m=0, buy_ratio_30m=0, curve_progress_pct=0,
+       tier='T0', updated_at=@updated_at WHERE key=@key`,
   );
   const delTrades = db.prepare(`DELETE FROM trades WHERE key=?`);
   const delSnaps = db.prepare(`DELETE FROM snapshots WHERE key=?`);
