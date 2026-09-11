@@ -32,15 +32,20 @@ test('毕业(listing) 直接判 T3', () => {
   assert.equal(evaluateTier({}, { ...base, listing: true }), 'T3');
 });
 
-test('市值+流动性双达标且有动量判 T2', () => {
-  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, netIn30m: 1 }), 'T2');
+test('市值+流动性双达标且净流入超过深度比例门槛判 T2', () => {
+  // 深度 6万 -> 门槛 max(2000, 60000×0.5%)=2000；净流入 5000 达标
+  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, netIn30m: 5000 }), 'T2');
 });
 
-test('纯体量无动量停在 T1（不因回填的老大币误判 T2）', () => {
-  // 大市值+大深度但净流入=0、无新买家 -> 停 T1，避免换库/换 VPS 时刷屏
-  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000 }), 'T1');
-  // 有足量新买家也可升 T2
-  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, newBuyers30m: 12 }), 'T2');
+test('纯体量+微弱净流入停在 T1（净流入低于深度比例门槛）', () => {
+  // 大市值+大深度但净流入仅 $1（<$2000 下限）、无新买家 -> 停 T1，避免换库/换 VPS 时刷屏
+  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, netIn30m: 1 }), 'T1');
+  // 净流入=0、无新买家同样停 T1
+  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000 }), 'T1');
+  // 深度越大门槛越高：深度 100万 -> 门槛 5000，净流入 3000 不够
+  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 1000000, netIn30m: 3000 }), 'T1');
+  // 有足量新买家也可升 T2（动量的另一条腿）
+  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, newBuyers30m: 12 }), 'T2');
 });
 
 test('仿盘热度只让原版升级', () => {

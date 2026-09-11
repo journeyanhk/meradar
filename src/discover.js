@@ -167,5 +167,8 @@ export function normalizeSwap(l, p, chain) {
   if (quoteRaw <= 0n) return null;
   const quoteHuman = Number(formatUnits(quoteRaw, qDec));
   const tokenHuman = Number(formatUnits(tokenRaw > 0n ? tokenRaw : 0n, p.tokenDecimals || 18));
+  // ts 使用 Date.now()：本函数只服务实时订阅路径（swap 到达即处理），偏差可忽略。
+  // ⚠️ 若将来新增「历史 Swap 回填」，勿复用此处的 Date.now()——需按块高估算
+  //    ts = now − (latest − blockNumber) × 区块间隔，与 backfill 中曲线成交的口径一致。
   return { chain, address: p.token, account, side, quoteHuman, quoteSym: p.quoteSym, tokenHuman, ts: Date.now() };
 }
