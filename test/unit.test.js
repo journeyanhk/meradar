@@ -49,10 +49,16 @@ test('纯体量+微弱净流入停在 T1（净流入低于深度比例门槛）'
   assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, newBuyers30m: 12 }), 'T2');
 });
 
-test('仿盘热度只让原版升级', () => {
+test('仿盘热度只做放大器：需叠加体量或动量才升 T2', () => {
   const m = { ...base, copycats: 5 };
-  assert.equal(evaluateTier({}, { ...m, isOriginal: true }), 'T2');
-  assert.equal(evaluateTier({}, { ...m, isOriginal: false }), 'T0');
+  // 仅同名多、无体量无动量 -> 不再单独构成 T2（曾经的误报根因）
+  assert.equal(evaluateTier({}, { ...m, isOriginal: true }), 'T0');
+  // 叠加 T1 级市值 -> 仿盘腿放大为 T2
+  assert.equal(evaluateTier({}, { ...m, isOriginal: true, marketCapUsd: 120000 }), 'T2');
+  // 叠加实时净流入(≥ 深度门槛下限 $2000) -> 同样升 T2
+  assert.equal(evaluateTier({}, { ...m, isOriginal: true, netIn30m: 2500 }), 'T2');
+  // 非原版即便同名多也不升级
+  assert.equal(evaluateTier({}, { ...m, isOriginal: false, marketCapUsd: 120000 }), 'T1');
 });
 
 test('买家数达标判 T1', () => {

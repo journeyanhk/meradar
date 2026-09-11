@@ -41,9 +41,15 @@ export function evaluateTier(cand, m) {
     (m.depthUsd || 0) * (T.T2.momentumMinNetInDepthPct || 0.005),
   );
   const hasMomentum = (m.netIn30m || 0) >= netInFloor || (m.newBuyers30m || 0) >= (T.T2.momentumMinNewBuyers30m || 10);
+  // 仿盘腿只做「放大器」而非独立触发器：同名 ≥ N 个仅在币本身已达 T1 级体量或有实时动量时才升 T2，
+  // 否则 Four.meme 上一个 $40K 的币常见 3 个同名复制品也会误报强提示。
+  const copycatQualifies =
+    m.isOriginal &&
+    m.copycats >= T.T2.copycatCount &&
+    ((m.marketCapUsd || 0) >= T.T1.marketCapUsd * k || (m.netIn30m || 0) >= netInFloor);
   const t2 =
     (m.marketCapUsd >= T.T2.marketCapUsd * k && m.liquidityUsd >= T.T2.minLiquidityUsd * k && hasMomentum) ||
-    (m.isOriginal && m.copycats >= T.T2.copycatCount) ||
+    copycatQualifies ||
     m.graduated; // 毕业到 Pancake 归入 T2 强提示
   if (t2) return 'T2';
 
