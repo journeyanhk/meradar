@@ -6,6 +6,7 @@ import { evaluateTier } from '../src/alert.js';
 import { resolveQuote } from '../src/enrich.js';
 import { normalizeSwap } from '../src/discover.js';
 import * as momentum from '../src/momentum.js';
+import { graduatedByCurve } from '../src/pool.js';
 
 // —— 1. Four.meme 事件签名的 topic0 必须与真实链上日志一致 ——
 // 这些 topic0 来自实际观测（见 review 报告）。类型排错会导致 selector 变化。
@@ -206,4 +207,33 @@ test('normalizeSwap V3 买入(quote=token1，排序相反)', () => {
   assert.equal(r.side, 'buy');
   assert.equal(r.quoteHuman, 5);
   assert.equal(r.tokenHuman, 50);
+});
+
+// —— 毕业检测（状态驱动）：修复「进度 100% 却无池，卡片冻结在毕业价」的 bug ——
+// offers 耗尽 或 募集达标(funds≥maxRaising) → 判定已毕业，触发反查池子。
+test('graduatedByCurve：offers 耗尽且有募集 → 已毕业', () => {
+  // 币安镇长/捏捏 现场：offers=0、funds>0、进度 100%
+  assert.equal(graduatedByCurve({ max_raising: null }, { offersPct: 0, fundsQuote: 12000, uniqueBuyers: 30 }, 18), true);
+});
+
+test('graduatedByCurve：募集达到 maxRaising → 已毕业(即使 offers 尚未归零)', () => {
+  // maxRaising=12000 USDT(6→这里用 18 位 raw)，funds 达标
+  const maxRaisingRaw = (12000n * 10n ** 18n).toString();
+  const cand = { max_raising: maxRaisingRaw };
+  assert.equal(graduatedByCurve(cand, { offersPct: 3, fundsQuote: 12000, uniqueBuyers: 40 }, 18), true);
+});
+
+test('graduatedByCurve：曲线期(offers 充足、募集未达标) → 未毕业', () => {
+  const maxRaisingRaw = (12000n * 10n ** 18n).toString();
+  const cand = { max_raising: maxRaisingRaw };
+  assert.equal(graduatedByCurve(cand, { offersPct: 42, fundsQuote: 5000, uniqueBuyers: 12 }, 18), false);
+});
+
+test('graduatedByCurve：无成交数据(offers 默认 0、无募集无买家) → 不误判毕业', () => {
+  // momentum 初始态 offers=0n → offersPct=0，但 funds/buyers 皆 0，不能当毕业
+  assert.equal(graduatedByCurve({ max_raising: null }, { offersPct: 0, fundsQuote: 0, uniqueBuyers: 0 }, 18), false);
+});
+
+test('graduatedByCurve：无 curve → false', () => {
+  assert.equal(graduatedByCurve({ max_raising: '1' }, null, 18), false);
 });

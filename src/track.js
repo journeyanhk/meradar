@@ -1,5 +1,6 @@
 import { readPoolMetrics, resolveQuote, quoteUsd } from './enrich.js';
 import { scoreCandidate } from './score.js';
+import { discoverPool, graduatedByCurve } from './pool.js';
 import { narrativeHit, copycatCount } from './narrative.js';
 import { maybeAlert } from './alert.js';
 import { store } from './db.js';
@@ -26,6 +27,19 @@ export async function pollCandidate(chain, cand) {
   const quotePriceUsd = q ? quoteUsd(chain, q.sym) : null;
   const quoteDec = q?.decimals || 18;
 
+  // 曲线期指标来自内存事件流（零 RPC）；毕业后用池子真实储备
+  const curve = momentum.curveMetrics(token, supplyHuman(cand), quotePriceUsd, quoteDec);
+
+  // 毕业检测（状态驱动，每轮自愈）：Token Manager 毕业后不再发买卖事件，momentum 价格会冻结在毕业瞬间。
+  // 池子若靠 PairCreated 一次性事件补——事件丢失/交易对被提前建/重启窗口——就永远接不上，卡片冻结在毕业价。
+  // 这里在 offers 耗尽或募集达标时主动反查交易对；找不到不报错，靠下一轮 tick 重试（注入流动性有几秒~几十秒延迟）。
+  if (!cand.pool && curve) {
+    if (graduatedByCurve(cand, curve, quoteDec)) {
+      const found = await discoverPool(chain, cand).catch((e) => { log.debug({ err: e.message }, 'discoverPool(track)'); return false; });
+      if (found) cand = store.get(cand.key) || cand; // 用最新 pool/pool_type/quote_symbol 走本轮池子定价
+    }
+  }
+
   // 毕业后拿到池子才可做 getAmountsOut 往返，补一次安全打分
   if (cand.pool && !hasHoneypotCheck(cand)) {
     const s = await scoreCandidate(chain, cand);
@@ -37,8 +51,7 @@ export async function pollCandidate(chain, cand) {
     }
   }
 
-  // 曲线期指标来自内存事件流（零 RPC）；毕业后用池子真实储备
-  const curve = momentum.curveMetrics(token, supplyHuman(cand), quotePriceUsd, quoteDec);
+  // 曲线期指标已在毕业检测前算好（curve）；毕业后用池子真实储备
   let poolM = null;
   if (cand.pool && cand.quote_symbol) {
     poolM = await readPoolMetrics(chain, {

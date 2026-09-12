@@ -4,15 +4,15 @@ import { scoreCandidate } from './score.js';
 import { store } from './db.js';
 import { config, chainConfig } from './config.js';
 import { httpClient } from './chain.js';
-import { fourMemeEvents, v2FactoryAbi, v3FactoryAbi } from './abi.js';
+import { fourMemeEvents } from './abi.js';
 import { bus, Events } from './bus.js';
 import { startTracker } from './track.js';
+import { discoverPool } from './pool.js';
 import * as momentum from './momentum.js';
 import { recordSeen, recordPromoted, recordTradeWrite, setSwapPools } from './health.js';
 import { child } from './logger.js';
 
 const log = child('engine');
-const V3_FEES = [100, 500, 2500, 10000];
 
 // 取某链 Four.meme Token Manager 地址（_tokenInfos 视图所在合约）。
 function tokenManagerAddr(chain) {
@@ -186,32 +186,7 @@ async function onSwap(sw) {
   recordTradeWrite();
 }
 
-// promote 时反查池子：遍历报价币 × (V2 getPair / V3 各费率 getPool)，取第一个非零池。
-async function discoverPool(chain, cand) {
-  const cfg = chainConfig(chain);
-  const token = cand.address;
-  const quotes = Object.entries(cfg.quoteTokens); // [sym, {address, decimals}]
-  const v2 = cfg.launchpads?.find((l) => l.type === 'amm-v2' && l.address && !/^0x0+$/.test(l.address));
-  const v3 = cfg.launchpads?.find((l) => l.type === 'amm-v3' && l.address && !/^0x0+$/.test(l.address));
-  const calls = [];
-  if (v2) for (const [sym, q] of quotes) calls.push({ kind: 'v2', sym, c: { address: v2.address, abi: v2FactoryAbi, functionName: 'getPair', args: [token, q.address] } });
-  if (v3) for (const [sym, q] of quotes) for (const fee of V3_FEES) calls.push({ kind: 'v3', sym, c: { address: v3.address, abi: v3FactoryAbi, functionName: 'getPool', args: [token, q.address, fee] } });
-  if (!calls.length) return;
-  const client = httpClient(chain);
-  let res;
-  try { res = await client.multicall({ allowFailure: true, contracts: calls.map((x) => x.c) }); }
-  catch (e) { log.debug({ err: e.message }, 'discoverPool multicall 失败'); return; }
-  for (let i = 0; i < res.length; i++) {
-    const r = res[i];
-    const addr = r?.status === 'success' ? r.result : null;
-    if (addr && !/^0x0+$/.test(addr)) {
-      store.setPool(cand.key, addr, calls[i].kind === 'v3' ? 'v3' : 'v2', calls[i].sym);
-      log.info({ token: cand.symbol, pool: addr, via: calls[i].kind }, 'promote 反查到已毕业池');
-      bus.emit(Events.POOLS_CHANGED, { chain });
-      return;
-    }
-  }
-}
+// promote 时反查池子（逻辑已抽到 src/pool.js，engine 与 track 共用）
 
 // AMM 建池 / 毕业：补池子地址与类型，供 track 定价，并重建成交订阅。
 async function onAmm(c) {
