@@ -345,3 +345,9 @@ test('fixture：曲线期 GoPlus 关键字段为空(→三态回落 WAIT)', () =
   assert.equal(r.sell_tax, '', '曲线期卖税字段空');
   assert.equal(r.buy_tax, '', '曲线期买税字段空');
 });
+
+test('fixture：V3 毕业币 CAKE 往返正常(status 0)，回收率≈99.4%(Uniswap SwapRouter02)', () => {
+  const g = _fixture.graduatedV3;
+  assert.equal(g.statusCode, 0, 'V3 正常往返 status=0');
+  assert.ok(g.recoveredBps > 9000 && g.recoveredBps <= 10000, `V3 回收率应≈9940，实得 ${g.recoveredBps}`);
+});

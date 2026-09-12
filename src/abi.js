@@ -19,6 +19,7 @@ export const v3PoolAbi = parseAbi([
   'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint32 feeProtocol, bool unlocked)',
   'function token0() view returns (address)',
   'function token1() view returns (address)',
+  'function fee() view returns (uint24)',
 ]);
 
 export const routerAbi = parseAbi([

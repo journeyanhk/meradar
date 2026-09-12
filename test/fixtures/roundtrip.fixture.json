@@ -1,6 +1,6 @@
 {
   "_note": "由 scripts/verify-roundtrip.mjs 生成；毕业币真实往返锚点，供单测离线断言。",
-  "generatedAt": "2026-09-12T08:25:20.730Z",
+  "generatedAt": "2026-09-12T08:33:28.561Z",
   "rpc": "https://bsc-rpc.publicnode.com",
   "stateOverrideProbe": "0x000000000000000000000000000000000000000000000000000000000000002a",
   "graduated": {
@@ -12,6 +12,16 @@
     "buyTaxBps": 0,
     "sellTaxBps": 0,
     "recoveredBps": 9950
+  },
+  "graduatedV3": {
+    "token": "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82",
+    "symbol": "CAKE",
+    "router": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",
+    "dex": "UniswapV3 SwapRouter02",
+    "fee": 3000,
+    "amountInWei": "20000000000000000",
+    "statusCode": 0,
+    "recoveredBps": 9940
   },
   "curvePhaseGoplusRaw": {
     "is_honeypot": "",
