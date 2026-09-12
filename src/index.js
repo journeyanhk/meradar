@@ -3,6 +3,7 @@ import { startServer } from './server.js';
 import { startEngine, backfillRecentCreates } from './engine.js';
 import { httpClient } from './chain.js';
 import { refreshBnbUsd, getBnbUsd } from './enrich.js';
+import { probeStateOverride } from './rpccap.js';
 import { store } from './db.js';
 import * as momentum from './momentum.js';
 import { logger } from './logger.js';
@@ -41,6 +42,7 @@ async function main() {
   for (const chain of config.enabledChains) {
     if (!config.rpc[chain]?.http) continue;
     await selfCheckLogs(chain);
+    await probeStateOverride(chain).catch(() => {}); // 往返模拟能力探测，结果进 /api/health
     if (chainConfig(chain).bnbUsdPool) {
       await refreshBnbUsd(chain);
       logger.info({ chain, bnbUsd: getBnbUsd(chain) }, 'BNB 现价已就绪');

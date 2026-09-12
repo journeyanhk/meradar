@@ -6,6 +6,7 @@ import { store } from './db.js';
 import { bus, Events } from './bus.js';
 import { linksFor } from './alert.js';
 import { healthSnapshot } from './health.js';
+import { rpcCapabilities } from './rpccap.js';
 import { child } from './logger.js';
 
 const log = child('server');
@@ -42,6 +43,7 @@ export async function startServer() {
     ok: true, chains: config.enabledChains,
     telegram: config.telegram.enabled, serverchan: config.serverchan.enabled,
     runtime: healthSnapshot(),
+    rpcCapabilities: rpcCapabilities(),
     time: Date.now(),
   }));
 
