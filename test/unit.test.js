@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { toEventSelector } from 'viem';
 import { fourMemeEvents } from '../src/abi.js';
 import { evaluateTier } from '../src/alert.js';
+import { classifyTradeSafety } from '../src/score.js';
 import { resolveQuote } from '../src/enrich.js';
 import { normalizeSwap } from '../src/discover.js';
 import * as momentum from '../src/momentum.js';
@@ -24,7 +25,8 @@ test('Four.meme 事件 topic0 与观测值前缀一致', () => {
   }
 });
 
-// —— 2. evaluateTier：分级逻辑 ——
+// —— 2. evaluateTier：分级逻辑（单出口对象，取 .tier）——
+const tierOf = (cand, m) => evaluateTier(cand, m).tier;
 const base = {
   liquidityUsd: 0, priceUsd: 0, marketCapUsd: 0, volumeUsd: 0,
   holders: 0, uniqueBuyers: 0, holderGrowthPct: 0, copycats: 0,
@@ -32,60 +34,101 @@ const base = {
 };
 
 test('毕业(listing) 直接判 T3', () => {
-  assert.equal(evaluateTier({}, { ...base, listing: true }), 'T3');
+  assert.equal(tierOf({}, { ...base, listing: true }), 'T3');
 });
 
 test('市值+流动性双达标且净流入超过深度比例门槛判 T2', () => {
   // 深度 6万 -> 门槛 max(2000, 60000×0.5%)=2000；净流入 5000 达标
-  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, netIn30m: 5000 }), 'T2');
+  assert.equal(tierOf({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, netIn30m: 5000 }), 'T2');
 });
 
 test('纯体量+微弱净流入停在 T1（净流入低于深度比例门槛）', () => {
   // 大市值+大深度但净流入仅 $1（<$2000 下限）、无新买家 -> 停 T1，避免换库/换 VPS 时刷屏
-  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, netIn30m: 1 }), 'T1');
+  assert.equal(tierOf({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, netIn30m: 1 }), 'T1');
   // 净流入=0、无新买家同样停 T1
-  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000 }), 'T1');
+  assert.equal(tierOf({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000 }), 'T1');
   // 深度越大门槛越高：深度 100万 -> 门槛 5000，净流入 3000 不够
-  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 1000000, netIn30m: 3000 }), 'T1');
+  assert.equal(tierOf({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 1000000, netIn30m: 3000 }), 'T1');
   // 有足量新买家也可升 T2（动量的另一条腿）
-  assert.equal(evaluateTier({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, newBuyers30m: 12 }), 'T2');
+  assert.equal(tierOf({}, { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, newBuyers30m: 12 }), 'T2');
 });
 
 test('仿盘热度只做放大器：需叠加体量或动量才升 T2', () => {
   const m = { ...base, copycats: 5 };
   // 仅同名多、无体量无动量 -> 不再单独构成 T2（曾经的误报根因）
-  assert.equal(evaluateTier({}, { ...m, isOriginal: true }), 'T0');
+  assert.equal(tierOf({}, { ...m, isOriginal: true }), 'T0');
   // 叠加 T1 级市值 -> 仿盘腿放大为 T2
-  assert.equal(evaluateTier({}, { ...m, isOriginal: true, marketCapUsd: 120000 }), 'T2');
+  assert.equal(tierOf({}, { ...m, isOriginal: true, marketCapUsd: 120000 }), 'T2');
   // 叠加实时净流入(≥ 深度门槛下限 $2000) -> 同样升 T2
-  assert.equal(evaluateTier({}, { ...m, isOriginal: true, netIn30m: 2500 }), 'T2');
+  assert.equal(tierOf({}, { ...m, isOriginal: true, netIn30m: 2500 }), 'T2');
   // 非原版即便同名多也不升级
-  assert.equal(evaluateTier({}, { ...m, isOriginal: false, marketCapUsd: 120000 }), 'T1');
+  assert.equal(tierOf({}, { ...m, isOriginal: false, marketCapUsd: 120000 }), 'T1');
 });
 
 test('买家数达标判 T1', () => {
-  assert.equal(evaluateTier({}, { ...base, uniqueBuyers: 40 }), 'T1');
+  assert.equal(tierOf({}, { ...base, uniqueBuyers: 40 }), 'T1');
 });
 
 test('毕业(graduated)归入 T2 而非 T3', () => {
-  assert.equal(evaluateTier({}, { ...base, graduated: true }), 'T2');
+  assert.equal(tierOf({}, { ...base, graduated: true }), 'T2');
 });
 
 test('增速触发需满足最小买家基数', () => {
   // holderGrowth10mPct=30，growthMinBuyers=20
-  assert.equal(evaluateTier({}, { ...base, uniqueBuyers: 7, holderGrowthPct: 40 }), 'T0');
-  assert.equal(evaluateTier({}, { ...base, uniqueBuyers: 22, holderGrowthPct: 40 }), 'T1');
+  assert.equal(tierOf({}, { ...base, uniqueBuyers: 7, holderGrowthPct: 40 }), 'T0');
+  assert.equal(tierOf({}, { ...base, uniqueBuyers: 22, holderGrowthPct: 40 }), 'T1');
 });
 
 test('叙事乘数放宽阈值：命中叙事时更低市值即可 T1', () => {
   // T1.marketCapUsd=100000，narrativeMultiplier=0.5 -> 命中后 5万即达标
   const m = { ...base, marketCapUsd: 60000 };
-  assert.equal(evaluateTier({}, { ...m, narrativeHits: [] }), 'T0');
-  assert.equal(evaluateTier({}, { ...m, narrativeHits: ['trump'] }), 'T1');
+  assert.equal(tierOf({}, { ...m, narrativeHits: [] }), 'T0');
+  assert.equal(tierOf({}, { ...m, narrativeHits: ['trump'] }), 'T1');
 });
 
 test('无信号维持 T0', () => {
-  assert.equal(evaluateTier({}, base), 'T0');
+  assert.equal(tierOf({}, base), 'T0');
+});
+
+// —— 2b. evaluateTier 三条独立新鲜度门 + capTier 封顶（单出口）——
+test('WAIT 的 capTier 把 T2 强提示封顶到 T1', () => {
+  const m = { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, netIn30m: 5000, capTier: 'T1' };
+  const r = evaluateTier({}, m);
+  assert.equal(r.rawTier, 'T2', 'rawTier 仍是 T2');
+  assert.equal(r.tier, 'T1', 'capTier=T1 封顶 -> T1');
+});
+
+test('成交不新鲜(>10min)把 T2 封顶到 T1', () => {
+  const now = 10_000_000;
+  const m = { ...base, marketCapUsd: 600000, liquidityUsd: 60000, depthUsd: 60000, netIn30m: 5000,
+    now, lastTradeTs: now - 11 * 60_000 };
+  const r = evaluateTier({}, m);
+  assert.equal(r.rawTier, 'T2');
+  assert.equal(r.tier, 'T1');
+  assert.ok(r.gaps.includes('成交不新鲜'));
+});
+
+test('往返结果过期(>10min)时毕业币强提示被降级至 T1；新鲜则恢复 T2', () => {
+  const now = 10_000_000;
+  const g = { ...base, graduated: true, graduatedAt: now - 5 * 60_000, now, lastTradeTs: now - 60_000 };
+  // 往返过期 -> 封顶 T1
+  const stale = evaluateTier({}, { ...g, roundTripCheckedAt: now - 11 * 60_000 });
+  assert.equal(stale.rawTier, 'T2', '毕业腿(≤60min) -> rawTier T2');
+  assert.equal(stale.tier, 'T1');
+  assert.ok(stale.gaps.includes('往返未核验/过期'));
+  // 往返新鲜 -> 恢复 T2
+  const fresh = evaluateTier({}, { ...g, roundTripCheckedAt: now - 60_000 });
+  assert.equal(fresh.tier, 'T2');
+});
+
+test('毕业 8 小时老币仅有成交、无动量 -> 毕业腿失效，不触发 T2', () => {
+  const now = 10_000_000;
+  const m = { ...base, graduated: true, graduatedAt: now - 8 * 3600_000,
+    marketCapUsd: 120000, liquidityUsd: 60000, depthUsd: 60000, // 达 T1 体量但无净流入/新买家
+    now, lastTradeTs: now - 60_000, roundTripCheckedAt: now - 60_000 };
+  const r = evaluateTier({}, m);
+  assert.notEqual(r.rawTier, 'T2', '毕业新鲜度过期 -> 毕业腿不再单独构成 T2');
+  assert.notEqual(r.tier, 'T2');
 });
 
 // —— 3. resolveQuote：符号与地址两种写法必须解析为同一对象 ——
@@ -276,7 +319,84 @@ test('goplus 缓存 + 在途合并：重复查同地址不再打网络', async (
 test('goplus N/A 字段：曲线期空字段记入 naFields，供三态回落 WAIT', async () => {
   mockGoplus({ '0xc1': { is_honeypot: '', sell_tax: '', buy_tax: '' } });
   const r = await goplusCheck('56', '0xC1');
-  assert.deepEqual(r.naFields.sort(), ['buyTax', 'isHoneypot', 'sellTax']);
+  // cannot_sell_all 缺省(undefined)也计入 N/A
+  assert.deepEqual(r.naFields.sort(), ['buyTax', 'cannotSellAll', 'isHoneypot', 'sellTax']);
+});
+
+// —— classifyTradeSafety 真值表：三态折叠的 8 条分支 ——
+// 优先级：GoPlus 显式正例 → 曲线期模板 → 毕业后往返 → GoPlus 补位。buyReverted/noTokens 一律 WAIT。
+const cleanGp = { isHoneypot: false, cannotSellAll: false, sellTaxBps: 300, naFields: [] };
+
+test('真值表①：GoPlus 貔貅 -> REJECT（即便毕业往返 ok，纵深防御优先）', () => {
+  const r = classifyTradeSafety({
+    graduated: true, roundTrip: { status: 'ok', sellTaxBps: 0 },
+    goplus: { isHoneypot: true, cannotSellAll: false, sellTaxBps: 0, naFields: [] },
+  });
+  assert.equal(r.state, 'REJECT');
+  assert.equal(r.source, 'goplus');
+});
+
+test('真值表②：GoPlus 无法全部卖出 -> REJECT', () => {
+  const r = classifyTradeSafety({
+    graduated: false, templateMatch: true,
+    goplus: { isHoneypot: false, cannotSellAll: true, sellTaxBps: 0, naFields: [] },
+  });
+  assert.equal(r.state, 'REJECT');
+});
+
+test('真值表③：GoPlus 卖税≥20% -> REJECT', () => {
+  const r = classifyTradeSafety({
+    graduated: true, roundTrip: { status: 'ok', sellTaxBps: 100 },
+    goplus: { isHoneypot: false, cannotSellAll: false, sellTaxBps: 2500, naFields: [] },
+  });
+  assert.equal(r.state, 'REJECT');
+});
+
+test('真值表④：曲线期命中平台模板 -> PASS(template)', () => {
+  const r = classifyTradeSafety({ graduated: false, templateMatch: true, roundTrip: null, goplus: null });
+  assert.equal(r.state, 'PASS');
+  assert.equal(r.source, 'template');
+  assert.equal(r.capTier, null);
+});
+
+test('真值表⑤：曲线期未命中模板 -> WAIT 封顶 T1', () => {
+  const r = classifyTradeSafety({ graduated: false, templateMatch: false, roundTrip: null, goplus: null });
+  assert.equal(r.state, 'WAIT');
+  assert.equal(r.capTier, 'T1');
+});
+
+test('真值表⑥：毕业往返 ok 且卖税 <20% -> PASS(roundtrip)', () => {
+  const r = classifyTradeSafety({ graduated: true, roundTrip: { status: 'ok', sellTaxBps: 300 }, goplus: null });
+  assert.equal(r.state, 'PASS');
+  assert.equal(r.source, 'roundtrip');
+  assert.equal(r.sellTaxBps, 300);
+});
+
+test('真值表⑦：毕业往返卖出 revert -> REJECT(疑似貔貅)', () => {
+  const r = classifyTradeSafety({ graduated: true, roundTrip: { status: 'sellReverted' }, goplus: null });
+  assert.equal(r.state, 'REJECT');
+  assert.equal(r.source, 'roundtrip');
+});
+
+test('真值表⑧：毕业往返买入 revert -> WAIT（交易未开/反机器人，退避复查）', () => {
+  const r = classifyTradeSafety({ graduated: true, roundTrip: { status: 'buyReverted' }, goplus: null });
+  assert.equal(r.state, 'WAIT');
+  assert.equal(r.capTier, 'T1');
+});
+
+test('真值表⑨：往返不可用 + GoPlus 干净 -> PASS(goplus 补位)', () => {
+  const r = classifyTradeSafety({ graduated: true, roundTrip: { status: 'unsupported' }, goplus: cleanGp });
+  assert.equal(r.state, 'PASS');
+  assert.equal(r.source, 'goplus');
+});
+
+test('真值表⑩：往返不可用 + GoPlus 关键字段 N/A -> WAIT', () => {
+  const r = classifyTradeSafety({
+    graduated: true, roundTrip: { status: 'error' },
+    goplus: { isHoneypot: false, cannotSellAll: false, sellTaxBps: 0, naFields: ['sellTax', 'isHoneypot', 'cannotSellAll'] },
+  });
+  assert.equal(r.state, 'WAIT');
+  assert.equal(r.capTier, 'T1');
 });
 
 // —— 往返模拟纯函数：taxBps 税率换算 ——

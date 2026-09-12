@@ -110,6 +110,7 @@ ensureColumns('candidates', [
   ['new_buyers_30m', 'new_buyers_30m INTEGER DEFAULT 0'],
   ['max_raising', 'max_raising TEXT'],                 // 毕业阈值(报价币最小单位, raw)；曲线进度=funds/maxRaising
   ['curve_progress_pct', 'curve_progress_pct REAL DEFAULT 0'],
+  ['graduated_at', 'graduated_at INTEGER'],            // 毕业(建池)时刻 ms；毕业腿强提示要求 ≤60min。老数据为 NULL
 ]);
 // trades 已有 price(成交时单价 USD)=price_at_trade，无需重复列；只补 mcap_at_trade：
 // 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
@@ -128,7 +129,7 @@ const stmt = {
     UPDATE candidates SET name=@name, symbol=@symbol, decimals=@decimals, total_supply=@total_supply,
       creator=@creator, updated_at=@updated_at WHERE key=@key
   `),
-  setPool: db.prepare(`UPDATE candidates SET pool=@pool, pool_type=@pool_type, quote_symbol=COALESCE(quote_symbol,@quote), graduated=1, updated_at=@updated_at WHERE key=@key`),
+  setPool: db.prepare(`UPDATE candidates SET pool=@pool, pool_type=@pool_type, quote_symbol=COALESCE(quote_symbol,@quote), graduated=1, graduated_at=COALESCE(graduated_at,@updated_at), updated_at=@updated_at WHERE key=@key`),
   // 曲线期报价币信息：quote_symbol 不覆盖已有值(毕业池可能已写)，max_raising/launch_time 补空。
   setCurveInfo: db.prepare(`UPDATE candidates SET quote_symbol=COALESCE(quote_symbol,@quote_symbol), max_raising=COALESCE(@max_raising,max_raising), launch_time=COALESCE(launch_time,@launch_time), updated_at=@updated_at WHERE key=@key`),
   promote: db.prepare(`UPDATE candidates SET status='active', updated_at=@updated_at WHERE key=@key AND status='seen'`),

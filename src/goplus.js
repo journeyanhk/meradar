@@ -37,6 +37,7 @@ function parseRow(r) {
   if (r.sell_tax == null || r.sell_tax === '') naFields.push('sellTax');
   if (r.buy_tax == null || r.buy_tax === '') naFields.push('buyTax');
   if (r.is_honeypot == null || r.is_honeypot === '') naFields.push('isHoneypot');
+  if (r.cannot_sell_all == null || r.cannot_sell_all === '') naFields.push('cannotSellAll');
   return {
     isHoneypot: r.is_honeypot === '1',
     cannotSellAll: r.cannot_sell_all === '1',

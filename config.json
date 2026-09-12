@@ -57,6 +57,12 @@
       "explorer": "https://bscscan.com",
       "gmgnBase": "https://gmgn.ai/bsc/token",
       "wbnbUsdPriceFallback": 900,
+      "templateCodeHashes": [
+        "0xbb6d668c425d9a1fa95dc0378c651bde6aae03ec03f861338211b55d14aa483e",
+        "0x01f0430e2bbc285e7a55cc7409977eccb1b7b944068956cffcb7dac5c75b3d1f",
+        "0x49052d1fff3ba35008538f6694480d71469a0a76c82ce47d0500cab6e8775f6d",
+        "0xa5529c201b5fdf90cdcddd546521c4e75374e47fdb1aa356859307a4532da97f"
+      ],
       "quoteTokens": {
         "WBNB": { "address": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c", "decimals": 18 },
         "USDT": { "address": "0x55d398326f99059fF775485246999027B3197955", "decimals": 18 },

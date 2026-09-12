@@ -1,8 +1,8 @@
 import { readPoolMetrics, resolveQuote, quoteUsd } from './enrich.js';
-import { scoreCandidate } from './score.js';
+import { scoreCandidate, evaluateTradeSafety } from './score.js';
 import { discoverPool, graduatedByCurve } from './pool.js';
 import { narrativeHit, copycatCount } from './narrative.js';
-import { maybeAlert } from './alert.js';
+import { maybeAlert, evaluateTier } from './alert.js';
 import { store } from './db.js';
 import { config, chainConfig } from './config.js';
 import { bus, Events } from './bus.js';
@@ -11,6 +11,7 @@ import { child } from './logger.js';
 import { formatUnits } from 'viem';
 
 const log = child('track');
+const RANK = { T0: 0, T1: 1, T2: 2, T3: 3 };
 
 function supplyHuman(cand) {
   if (!cand.total_supply) return 0;
@@ -40,16 +41,16 @@ export async function pollCandidate(chain, cand) {
     }
   }
 
-  // 毕业后拿到池子才可做 getAmountsOut 往返，补一次安全打分
-  if (cand.pool && !hasHoneypotCheck(cand)) {
-    const s = await scoreCandidate(chain, cand);
-    store.setSafety(cand.key, s.checks);
-    if (s.veto) {
-      store.setStatus(cand.key, 'rejected', s.reason);
-      bus.emit(Events.UPDATE, { ...store.get(cand.key) });
-      return;
-    }
+  // 每轮跑三态贸易安全：曲线期查平台模板白名单，毕业后跑往返模拟（各自带缓存，重复调用廉价）。
+  // REJECT 直接置 rejected 退出；PASS/WAIT 结果连同新鲜度传入分级层封顶。
+  const ts = await scoreCandidate(chain, cand);
+  store.setSafety(cand.key, ts.checks);
+  if (ts.veto) {
+    store.setStatus(cand.key, 'rejected', ts.reason);
+    bus.emit(Events.UPDATE, { ...store.get(cand.key) });
+    return;
   }
+  const tradeSafety = ts.checks.tradeSafety || null;
 
   // 曲线期指标已在毕业检测前算好（curve）；毕业后用池子真实储备
   let poolM = null;
@@ -82,6 +83,14 @@ export async function pollCandidate(chain, cand) {
   // 净流入/最大单笔/买卖比/新买家 —— 全部一句 SQL 取自 trades 表
   const flow = store.tradeFlow(cand.key);
 
+  // 三条独立新鲜度门的输入（见 alert.evaluateTier）：
+  //  · 成交新鲜度 = 最近一次成交距今（trades 表 → 内存动量）
+  //  · 毕业新鲜度 = graduated_at；老数据(NULL)传 0 → 视为很久以前 → 毕业腿不再单独触发 T2
+  //  · 往返新鲜度 = 本轮 tradeSafety 的 checkedAt（毕业币）
+  const now = Date.now();
+  const lastTradeTs = (store.lastTradeTs(cand.key) ?? momentum.lastTradeTs(cand.address)) || 0;
+  const graduatedAt = cand.graduated ? (cand.graduated_at ?? 0) : null;
+
   const metrics = {
     liquidityUsd: depthUsd,
     depthUsd,
@@ -104,6 +113,13 @@ export async function pollCandidate(chain, cand) {
     isOriginal: !cand.copy_of,
     graduated: !!cand.graduated,
     listing: false, // 毕业不再直接判 T3；T3 保留给真实 CEX/Alpha 上币事件源（未来接入）
+    // —— 贸易安全 + 新鲜度（供 evaluateTier 封顶 & 告警安全行）——
+    now,
+    lastTradeTs,
+    graduatedAt,
+    roundTripCheckedAt: tradeSafety?.checkedAt ?? null,
+    capTier: tradeSafety?.capTier ?? null,
+    tradeSafety,
   };
 
   store.updateMetrics(cand.key, {
@@ -136,14 +152,25 @@ export async function pollCandidate(chain, cand) {
   });
 
   const fresh = store.get(cand.key);
+  // 强提示前保新鲜：若本轮 rawTier 已达 T2/T3 但毕业币往返结果过期(>10min)，重跑一次往返再定级，
+  // 避免拿着旧快照发强提示。曲线期(模板)无此问题，模板哈希永久有效。
+  const prelim = evaluateTier(fresh, metrics);
+  if (cand.pool && RANK[prelim.rawTier] >= RANK.T2 && !prelim.rtFresh) {
+    const ts2 = await evaluateTradeSafety(chain, cand, { wantFresh: true }).catch(() => null);
+    if (ts2) {
+      metrics.tradeSafety = ts2;
+      metrics.roundTripCheckedAt = ts2.checkedAt ?? null;
+      metrics.capTier = ts2.capTier ?? null;
+      store.setSafety(cand.key, { ...ts.checks, tradeSafety: ts2 });
+      if (ts2.state === 'REJECT') {
+        store.setStatus(cand.key, 'rejected', ts2.reason);
+        bus.emit(Events.UPDATE, { ...store.get(cand.key) });
+        return;
+      }
+    }
+  }
   await maybeAlert(chain, fresh, metrics);
   bus.emit(Events.UPDATE, { ...store.get(cand.key) });
-}
-
-function hasHoneypotCheck(cand) {
-  if (!cand.safety_json) return false;
-  try { const s = JSON.parse(cand.safety_json); return !!(s.honeypot && s.honeypot.ok !== undefined); }
-  catch { return false; }
 }
 
 // 并发受限执行
