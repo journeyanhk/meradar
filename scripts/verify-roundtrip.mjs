@@ -7,7 +7,6 @@ import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { CHECKER_RUNTIME, CHECKER_ABI, CHECKER_V3_RUNTIME, CHECKER_V3_ABI } from '../src/roundtrip-bytecode.js';
-import { routerAbi } from '../src/abi.js';
 import { taxBps } from '../src/roundtrip.js';
 
 const RPC = process.argv[2] || 'https://bsc-rpc.publicnode.com';
@@ -32,15 +31,13 @@ async function main() {
     stateOverride: [{ address: CHECKER, code: '0x7f000000000000000000000000000000000000000000000000000000000000002a60005260206000f3' }],
   }).then((r) => r.data).catch((e) => 'ERR:' + (e.shortMessage || e.message));
 
-  // 2) 毕业币往返
+  // 2) 毕业币往返（theoBuy/theoSell 现由合约按买前/买后各自时点返回，不再外部 getAmountsOut）
   const data = encodeFunctionData({ abi: CHECKER_ABI, functionName: 'checkV2', args: [ROUTER, [WBNB, CAKE], [CAKE, WBNB], CAKE] });
   const { data: out } = await client.call({
     to: CHECKER, account: CHECKER, value: amountIn, data,
     stateOverride: [{ address: CHECKER, code: CHECKER_RUNTIME, balance: amountIn + parseEther('1') }],
   });
-  const [code, gotBuy, gotSell] = decodeFunctionResult({ abi: CHECKER_ABI, functionName: 'checkV2', data: out });
-  const ob = await client.readContract({ address: ROUTER, abi: routerAbi, functionName: 'getAmountsOut', args: [amountIn, [WBNB, CAKE]] });
-  const os = await client.readContract({ address: ROUTER, abi: routerAbi, functionName: 'getAmountsOut', args: [gotBuy, [CAKE, WBNB]] });
+  const [code, gotBuy, gotSell, theoBuy, theoSell] = decodeFunctionResult({ abi: CHECKER_ABI, functionName: 'checkV2', data: out });
 
   // 3) V3 毕业币往返(Uniswap V3 SwapRouter02，CAKE fee 3000)：验证 V3 分支字节码，Arc 主力形态。
   const dataV3 = encodeFunctionData({ abi: CHECKER_V3_ABI, functionName: 'checkV3', args: [V3_ROUTER, WBNB, CAKE, V3_FEE] });
@@ -58,8 +55,8 @@ async function main() {
     graduated: {
       token: CAKE, symbol: 'CAKE', router: ROUTER, amountInWei: amountIn.toString(),
       statusCode: Number(code),
-      buyTaxBps: taxBps(ob[ob.length - 1], gotBuy),
-      sellTaxBps: taxBps(os[os.length - 1], gotSell),
+      buyTaxBps: taxBps(theoBuy, gotBuy),
+      sellTaxBps: taxBps(theoSell, gotSell),
       recoveredBps: Number((gotSell * 10000n) / amountIn),
     },
     graduatedV3: {

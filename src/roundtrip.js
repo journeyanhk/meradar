@@ -8,7 +8,7 @@ import { CHECKER_RUNTIME, CHECKER_ABI, CHECKER_V3_RUNTIME, CHECKER_V3_ABI } from
 import { httpClient } from './chain.js';
 import { chainConfig } from './config.js';
 import { resolveQuote } from './enrich.js';
-import { routerAbi, v3PoolAbi } from './abi.js';
+import { v3PoolAbi } from './abi.js';
 import { stateOverrideSupported } from './rpccap.js';
 import { child } from './logger.js';
 
@@ -78,20 +78,14 @@ export async function roundTripCheck(chain, cand, { amountIn = DEFAULT_AMOUNT_IN
   const code = Number(ret[0]);
   const gotBuy = ret[1];
   const gotSell = ret[2];
+  const theoBuy = ret[3];
+  const theoSell = ret[4];
   if (code === 1) return wrap({ status: 'buyReverted', note: '买入 revert(可能未开交易/反机器人)' });
   if (code === 2) return wrap({ status: 'noTokens', note: '买到 0 代币' });
-  if (code === 3) return wrap({ status: 'sellReverted', gotBuy: gotBuy.toString(), note: '卖出 revert(疑似貔貅)' });
+  if (code === 3) return wrap({ status: 'sellReverted', gotBuy: gotBuy.toString(), sellTaxBps: taxBps(theoSell, gotSell), note: '卖出 revert(疑似貔貅)' });
 
-  // code 0：正常往返。理论卖出量要用「实际买到的 gotBuy」去算，否则买税会被二次计入卖税。
-  let theoBuy = null, theoSell = null;
-  try {
-    const ob = await client.readContract({ address: getAddress(router), abi: routerAbi, functionName: 'getAmountsOut', args: [amountIn, buyPath] });
-    theoBuy = ob[ob.length - 1];
-    const os = await client.readContract({ address: getAddress(router), abi: routerAbi, functionName: 'getAmountsOut', args: [gotBuy, sellPath] });
-    theoSell = os[os.length - 1];
-  } catch (e) {
-    log.debug({ err: e.message }, 'getAmountsOut 失败(仅影响理论税率计算)');
-  }
+  // code 0：正常往返。theoBuy(买入前储备)/theoSell(买入把储备推高后的储备) 已在合约内按各自时点算好，
+  // 直接用即可——避免卖税被低估约 2× 买入冲击，也省两次 RPC。
   return wrap({
     status: 'ok',
     gotBuy: gotBuy.toString(),

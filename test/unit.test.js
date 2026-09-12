@@ -351,3 +351,12 @@ test('fixture：V3 毕业币 CAKE 往返正常(status 0)，回收率≈99.4%(Uni
   assert.equal(g.statusCode, 0, 'V3 正常往返 status=0');
   assert.ok(g.recoveredBps > 9000 && g.recoveredBps <= 10000, `V3 回收率应≈9940，实得 ${g.recoveredBps}`);
 });
+
+test('taxBps 有税代币桩：合约按买后储备返回 theoSell，10%卖税→1000bps 不被冲击低估', () => {
+  // 模拟合约返回：买后储备下理论卖出 theoSell=1_000_000，实际到手 gotSell=900_000（扣 10% 卖税）。
+  // 旧实现用买前储备算 theoSell 会偏小、把税钳成 0；现在 theo 与卖出同一时点，税率如实为 1000bps。
+  assert.equal(taxBps(1_000_000n, 900_000n), 1000, '10% 卖税 → 1000bps');
+  assert.equal(taxBps(1_000_000n, 800_000n), 2000, '20% 卖税 → 命中 REJECT 阈值');
+  // 无税代币正滑点：买后储备更深，gotSell 可能 ≥ theoSell → 钳 0，不误报
+  assert.equal(taxBps(1_000_000n, 1_005_000n), 0, '正滑点 → 0');
+});

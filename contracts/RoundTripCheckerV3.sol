@@ -55,7 +55,9 @@ contract RoundTripCheckerV3 {
         gotBuy = IERC20(token).balanceOf(address(this));
         if (gotBuy == 0) return (2, 0, 0);
 
-        IERC20(token).approve(router, gotBuy);
+        // approve 低级 call 忽略返回值：非标准代币不会在这里 revert(与 V2 版一致)。
+        (bool _ok, ) = token.call(abi.encodeWithSelector(IERC20.approve.selector, router, gotBuy));
+        _ok;
         uint256 wethBefore = IERC20(weth).balanceOf(address(this));
         try r.exactInputSingle(IV3SwapRouter.ExactInputSingleParams({
             tokenIn: token,

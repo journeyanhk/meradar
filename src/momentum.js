@@ -6,7 +6,7 @@ const WINDOW_MS = 30 * 60_000;
 function get(token) {
   const k = token.toLowerCase();
   let s = state.get(k);
-  if (!s) { s = { buyers: new Set(), buyTs: [], lastPriceWei: 0n, volRaw: 0n, funds: 0n, offers: 0n, peakMcapUsd: 0, lastTradeTs: 0 }; state.set(k, s); }
+  if (!s) { s = { buyers: new Set(), buyTs: [], lastPriceWei: 0n, volRaw: 0n, funds: 0n, offers: null, peakMcapUsd: 0, lastTradeTs: 0 }; state.set(k, s); }
   return s;
 }
 
@@ -42,8 +42,9 @@ export function curveMetrics(token, supplyHuman, quotePriceUsd, quoteDecimals = 
   if (marketCapUsd > s.peakMcapUsd) s.peakMcapUsd = marketCapUsd;
   const now = Date.now();
   const buys30m = s.buyTs.filter((t) => now - t < WINDOW_MS).length;
-  const offersHuman = Number(s.offers) / 1e18; // meme 代币固定 18 位
-  const offersPct = supplyHuman > 0 ? Math.min(100, (offersHuman / supplyHuman) * 100) : 0;
+  // offers 未收到过事件时为 null：曲线进度未知，offersPct 返回 null，避免重启回灌后被误判「已毕业」(offersPct===0)。
+  const offersHuman = s.offers == null ? null : Number(s.offers) / 1e18; // meme 代币固定 18 位
+  const offersPct = s.offers == null ? null : (supplyHuman > 0 ? Math.min(100, (offersHuman / supplyHuman) * 100) : 0);
   const fundsQuote = Number(s.funds) / div; // 募集额(报价币人类单位)
   return {
     uniqueBuyers: s.buyers.size,

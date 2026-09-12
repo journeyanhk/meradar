@@ -10,14 +10,18 @@ import { child } from './logger.js';
 const log = child('pool');
 const V3_FEES = [100, 500, 2500, 10000];
 
-// 曲线状态是否已毕业：offers 耗尽（且确有活动，排除无数据的默认 0），或募集达标（funds ≥ maxRaising）。
+// 曲线状态是否已毕业：offers 耗尽（严格 0 且非 null，排除重启回灌后 offers 未知的币），
+// 或募集达标（funds ≥ maxRaising），或持久化的曲线进度已达 99%（重启后内存清空、Token Manager
+// 毕业后停发事件，仅靠内存无法再判定，用 DB 落库的 curve_progress_pct 兜底）。
 // 纯函数，供 track 每轮判断是否该反查池子；抽出便于单测。cand.max_raising 是报价币最小单位(raw)。
 export function graduatedByCurve(cand, curve, quoteDec = 18) {
   if (!curve) return false;
   const maxRaisingHuman = cand?.max_raising ? Number(cand.max_raising) / (10 ** quoteDec) : 0;
+  const persistedProgress = Number(cand?.curve_progress_pct) || 0;
   return (
     (curve.offersPct === 0 && ((curve.fundsQuote || 0) > 0 || (curve.uniqueBuyers || 0) > 0)) ||
-    (maxRaisingHuman > 0 && (curve.fundsQuote || 0) >= maxRaisingHuman * 0.999)
+    (maxRaisingHuman > 0 && (curve.fundsQuote || 0) >= maxRaisingHuman * 0.999) ||
+    persistedProgress >= 99
   );
 }
 
