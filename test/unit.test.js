@@ -7,6 +7,7 @@ import { resolveQuote } from '../src/enrich.js';
 import { normalizeSwap } from '../src/discover.js';
 import * as momentum from '../src/momentum.js';
 import { graduatedByCurve } from '../src/pool.js';
+import { goplusCheck } from '../src/goplus.js';
 
 // —— 1. Four.meme 事件签名的 topic0 必须与真实链上日志一致 ——
 // 这些 topic0 来自实际观测（见 review 报告）。类型排错会导致 selector 变化。
@@ -236,4 +237,44 @@ test('graduatedByCurve：无成交数据(offers 默认 0、无募集无买家) �
 
 test('graduatedByCurve：无 curve → false', () => {
   assert.equal(graduatedByCurve({ max_raising: '1' }, null, 18), false);
+});
+
+// —— 共享 GoPlus 客户端：缓存 / 在途合并 / 微批 / N/A 字段 ——
+function mockGoplus(rows) {
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(url);
+    const addrs = new URL(url).searchParams.get('contract_addresses').split(',');
+    const result = {};
+    for (const a of addrs) if (rows[a.toLowerCase()]) result[a.toLowerCase()] = rows[a.toLowerCase()];
+    return { json: async () => ({ result }) };
+  };
+  return calls;
+}
+
+test('goplus 微批：同窗口多地址合并为一次请求，税率换算正确', async () => {
+  const calls = mockGoplus({
+    '0xa1': { is_honeypot: '0', sell_tax: '0.02', buy_tax: '0.01', cannot_sell_all: '0' },
+    '0xa2': { is_honeypot: '1', sell_tax: '0.5', buy_tax: '0' },
+  });
+  const [a, b] = await Promise.all([goplusCheck('56', '0xA1'), goplusCheck('56', '0xA2')]);
+  assert.equal(calls.length, 1, '两个地址应合并为一次请求');
+  assert.equal(a.sellTaxBps, 200);
+  assert.equal(b.isHoneypot, true);
+});
+
+test('goplus 缓存 + 在途合并：重复查同地址不再打网络', async () => {
+  mockGoplus({ '0xb1': { is_honeypot: '0', sell_tax: '0.03' } });
+  await goplusCheck('56', '0xB1'); // 填充缓存
+  const calls = mockGoplus({ '0xb1': { is_honeypot: '0', sell_tax: '0.03' } });
+  const [c, d] = await Promise.all([goplusCheck('56', '0xB1'), goplusCheck('56', '0xB1')]);
+  assert.equal(calls.length, 0, '命中缓存应 0 次请求');
+  assert.equal(c.sellTaxBps, 300);
+  assert.equal(c, d);
+});
+
+test('goplus N/A 字段：曲线期空字段记入 naFields，供三态回落 WAIT', async () => {
+  mockGoplus({ '0xc1': { is_honeypot: '', sell_tax: '', buy_tax: '' } });
+  const r = await goplusCheck('56', '0xC1');
+  assert.deepEqual(r.naFields.sort(), ['buyTax', 'isHoneypot', 'sellTax']);
 });
