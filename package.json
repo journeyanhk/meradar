@@ -18,5 +18,8 @@
     "fastify": "^4.28.1",
     "pino": "^9.4.0",
     "viem": "^2.21.19"
+  },
+  "devDependencies": {
+    "solc": "^0.8.37"
   }
 }

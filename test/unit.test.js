@@ -278,3 +278,70 @@ test('goplus N/A 字段：曲线期空字段记入 naFields，供三态回落 WA
   const r = await goplusCheck('56', '0xC1');
   assert.deepEqual(r.naFields.sort(), ['buyTax', 'isHoneypot', 'sellTax']);
 });
+
+// —— 往返模拟纯函数：taxBps 税率换算 ——
+import { taxBps, buildPaths } from '../src/roundtrip.js';
+import { getAddress } from 'viem';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+test('taxBps：无税/正滑点记 0，正税按 bps，理论量缺失返回 null', () => {
+  assert.equal(taxBps(null, 5n), null, '理论量缺失 → null');
+  assert.equal(taxBps(0n, 5n), null, '理论量<=0 → null');
+  assert.equal(taxBps(100n, 100n), 0, 'got=theo → 0');
+  assert.equal(taxBps(100n, 120n), 0, 'got>theo(正滑点) → 0');
+  assert.equal(taxBps(100n, 98n), 200, '到手少 2% → 200bps');
+  assert.equal(taxBps(10000n, 9500n), 500, '到手少 5% → 500bps');
+});
+
+// —— 往返模拟纯函数：buildPaths 买/卖路径 ——
+const _pathCfg = {
+  quoteTokens: {
+    WBNB: { address: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', decimals: 18 },
+    USDT: { address: '0x55d398326f99059fF775485246999027B3197955', decimals: 18 },
+  },
+};
+const _tok = '0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82';
+
+test('buildPaths：WBNB 报价单跳，USDT 报价经 WBNB 两跳', () => {
+  const w = getAddress(_pathCfg.quoteTokens.WBNB.address);
+  const u = getAddress(_pathCfg.quoteTokens.USDT.address);
+  const t = getAddress(_tok);
+
+  const wbnb = buildPaths(_pathCfg, 'WBNB', _tok);
+  assert.deepEqual(wbnb.buyPath, [w, t], 'WBNB 买单跳');
+  assert.deepEqual(wbnb.sellPath, [t, w], 'WBNB 卖单跳');
+
+  const usdt = buildPaths(_pathCfg, 'USDT', _tok);
+  assert.deepEqual(usdt.buyPath, [w, u, t], 'USDT 买两跳 WBNB→USDT→token');
+  assert.deepEqual(usdt.sellPath, [t, u, w], 'USDT 卖两跳 token→USDT→WBNB');
+});
+
+test('buildPaths：报价币无法解析返回 null', () => {
+  assert.equal(buildPaths(_pathCfg, 'NOPE', _tok), null);
+  assert.equal(buildPaths({ quoteTokens: {} }, 'WBNB', _tok), null, '无 WBNB → null');
+});
+
+// —— 固化 fixture：毕业币真实往返锚点 + 曲线期 GoPlus 空字段 ——
+const _fixture = JSON.parse(
+  readFileSync(fileURLToPath(new URL('./fixtures/roundtrip.fixture.json', import.meta.url)), 'utf8'),
+);
+
+test('fixture：毕业币 CAKE 往返正常(status 0)，回收率≈99.5%，无税', () => {
+  const g = _fixture.graduated;
+  assert.equal(g.statusCode, 0, '正常往返 status=0');
+  assert.equal(g.buyTaxBps, 0, 'CAKE 无买税');
+  assert.equal(g.sellTaxBps, 0, 'CAKE 无卖税');
+  assert.ok(g.recoveredBps > 9000 && g.recoveredBps <= 10000, `回收率应≈9950，实得 ${g.recoveredBps}`);
+});
+
+test('fixture：RPC 探测返回常量 42(0x..2a)，说明支持 stateOverride', () => {
+  assert.ok(/2a$/.test(_fixture.stateOverrideProbe), '探测应返回 0x..002a');
+});
+
+test('fixture：曲线期 GoPlus 关键字段为空(→三态回落 WAIT)', () => {
+  const r = _fixture.curvePhaseGoplusRaw;
+  assert.equal(r.is_honeypot, '', '曲线期貔貅字段空');
+  assert.equal(r.sell_tax, '', '曲线期卖税字段空');
+  assert.equal(r.buy_tax, '', '曲线期买税字段空');
+});
