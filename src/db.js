@@ -111,6 +111,11 @@ ensureColumns('candidates', [
   ['max_raising', 'max_raising TEXT'],                 // 毕业阈值(报价币最小单位, raw)；曲线进度=funds/maxRaising
   ['curve_progress_pct', 'curve_progress_pct REAL DEFAULT 0'],
 ]);
+// trades 已有 price(成交时单价 USD)=price_at_trade，无需重复列；只补 mcap_at_trade：
+// 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
+ensureColumns('trades', [
+  ['mcap_at_trade', 'mcap_at_trade REAL'],
+]);
 
 const stmt = {
   upsertCandidate: db.prepare(`
@@ -167,7 +172,7 @@ const stmt = {
     FROM candidates
   `),
   missedKills: db.prepare(`SELECT COUNT(*) AS missed FROM candidates WHERE status='rejected' AND peak_mcap_usd >= 1000000`),
-  insertTrade: db.prepare(`INSERT INTO trades (key, ts, side, account, quote_amount, token_amount, price) VALUES (@key, @ts, @side, @account, @quote_amount, @token_amount, @price)`),
+  insertTrade: db.prepare(`INSERT INTO trades (key, ts, side, account, quote_amount, token_amount, price, mcap_at_trade) VALUES (@key, @ts, @side, @account, @quote_amount, @token_amount, @price, @mcap_at_trade)`),
   lastTradeTs: db.prepare(`SELECT MAX(ts) AS ts FROM trades WHERE key=?`),
   deleteOldTrades: db.prepare(`DELETE FROM trades WHERE ts < ?`),
   countTrades: db.prepare(`SELECT COUNT(*) AS n FROM trades`),
@@ -221,7 +226,7 @@ export const store = {
   activeCandidates(limit = 400) { return stmt.activeCandidates.all(limit); },
   feed(limit = 200) { return stmt.listFeed.all(limit); },
   stats(since24h) { return { ...stmt.stats.get(since24h), missed: stmt.missedKills.get().missed }; },
-  addTrade(t) { stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, ...t }); },
+  addTrade(t) { stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, mcap_at_trade: null, ...t }); },
   lastTradeTs(key) { return stmt.lastTradeTs.get(key)?.ts ?? null; },
   purgeTrades(beforeMs) { return stmt.deleteOldTrades.run(beforeMs).changes; },
   tradeCount() { return stmt.countTrades.get().n; },

@@ -11,8 +11,16 @@ import { discoverPool } from './pool.js';
 import * as momentum from './momentum.js';
 import { recordSeen, recordPromoted, recordTradeWrite, setSwapPools } from './health.js';
 import { child } from './logger.js';
+import { formatUnits } from 'viem';
 
 const log = child('engine');
+
+// 代币供应量(human)，用于把成交单价换算成成交时市值
+function supplyHumanOf(cand) {
+  if (!cand?.total_supply) return 0;
+  try { return Number(formatUnits(BigInt(cand.total_supply), cand.decimals || 18)); }
+  catch { return 0; }
+}
 
 // 取某链 Four.meme Token Manager 地址（_tokenInfos 视图所在合约）。
 function tokenManagerAddr(chain) {
@@ -32,7 +40,9 @@ function recordCurveTrade(t, cand) {
   const tokenHuman = t.amount != null ? Number(t.amount) / 1e18 : 0; // meme 代币固定 18 位
   const side = t.isBuy ? 'buy' : 'sell';
   const ts = t.ts || Date.now();
-  store.addTrade({ key: cand.key, ts, side, account: t.account, quote_amount: usd, token_amount: tokenHuman, price: tokenHuman > 0 ? usd / tokenHuman : 0 });
+  const price = tokenHuman > 0 ? usd / tokenHuman : 0;
+  const supply = supplyHumanOf(cand);
+  store.addTrade({ key: cand.key, ts, side, account: t.account, quote_amount: usd, token_amount: tokenHuman, price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null });
   if (side === 'buy' && t.account) store.addBuyer(cand.key, t.account, ts);
   recordTradeWrite();
 }
@@ -177,10 +187,12 @@ async function onSwap(sw) {
   const isBuy = sw.side === 'buy';
   momentum.onTrade({ token: sw.address, account: isBuy ? sw.account : null, isBuy, ts: sw.ts });
   const usd = (sw.quoteHuman || 0) * quoteUsd(sw.chain, sw.quoteSym);
+  const price = sw.tokenHuman > 0 ? usd / sw.tokenHuman : 0;
+  const supply = supplyHumanOf(cand);
   store.addTrade({
     key, ts: sw.ts, side: sw.side, account: sw.account,
     quote_amount: usd, token_amount: sw.tokenHuman || 0,
-    price: sw.tokenHuman > 0 ? usd / sw.tokenHuman : 0,
+    price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null,
   });
   if (isBuy && sw.account) store.addBuyer(key, sw.account, sw.ts);
   recordTradeWrite();
