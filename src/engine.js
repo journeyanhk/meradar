@@ -8,7 +8,7 @@ import { fourMemeEvents } from './abi.js';
 import { bus, Events } from './bus.js';
 import { startTracker } from './track.js';
 import { discoverPool } from './pool.js';
-import { recordTemplate } from './template.js';
+import { learnTemplate, recordPromotedTemplate } from './template.js';
 import * as momentum from './momentum.js';
 import { recordSeen, recordPromoted, recordTradeWrite, setSwapPools } from './health.js';
 import { child } from './logger.js';
@@ -49,6 +49,8 @@ function recordCurveTrade(t, cand) {
 }
 
 // TokenCreate：只登记，不轮询。事件已带 name/symbol/creator/totalSupply，零 RPC。
+// 模板自学习计数在此抽样（1/10）：见 learnTemplate 注释——放 create 才能在轮换后十几分钟学会新模板。
+let createSeq = 0;
 async function onCreate(c) {
   const key = `${c.chain}:${c.address.toLowerCase()}`;
   if (store.get(key)) return;
@@ -65,6 +67,10 @@ async function onCreate(c) {
   });
   if (!inserted) return;
   recordSeen();
+  // 抽样 1/10 累计码哈希频次（TokenCreate=平台部署证据）；仅一次 getCode，httpClient 已开 batch。
+  if (createSeq++ % 10 === 0) {
+    await learnTemplate(c.chain, c.address).catch((e) => log.debug({ err: e.message }, 'learnTemplate'));
+  }
   log.debug({ chain: c.chain, symbol: c.symbol }, '登记新币(seen)');
 }
 
@@ -122,9 +128,9 @@ async function onTrade(t) {
   if (!store.promote(key)) return;
   recordPromoted();
 
-  // 模板自学习：TokenCreate 由 Token Manager 发出即「平台部署」证据，累计该币码哈希频次供白名单自学习。
-  // 先于安全打分执行，使刚跨过阈值的模板对本币的 matchesTemplate 立即生效（同时预热码哈希缓存）。
-  await recordTemplate(t.chain, t.address).catch((e) => log.debug({ err: e.message }, 'recordTemplate'));
+  // 模板 health：记录本次 promote 的币是否命中已知模板（未知率进 /api/health 监控轮换）。
+  // 计数已移到 onCreate 抽样；此处不再 bump，仅统计。matchesTemplate 读实时白名单，学习到的哈希即时生效。
+  await recordPromotedTemplate(t.chain, t.address).catch((e) => log.debug({ err: e.message }, 'recordPromotedTemplate'));
 
   // promote 那一刻把内存买家集合整体落库；first_ts 写 0，使这批「已存量」买家不被
   // newBuyers30m(first_ts>=since) 计入，避免升级后 30 分钟内「新买家」虚高为全部买家。

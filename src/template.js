@@ -67,23 +67,32 @@ export async function matchesTemplate(chain, address) {
   return whitelisted(chain, [h.proxyHash, h.implHash]);
 }
 
-// promote 时调用：累计该币码哈希频次，count≥阈值自动进白名单。返回 promote 时是否「已知模板」（供 health）。
-export async function recordTemplate(chain, address) {
+// TokenCreate(抽样)时调用：累计该币码哈希频次，count≥阈值自动进白名单。
+// 计数放在 create 而非 promote —— Four.meme 每小时约创建 1000 币、过准入仅几十，轮换后放 promote
+// 需攒 20 个「过准入的币」(数小时~1天)期间新模板全 WAIT；放 create 抽样 1/10 约 100 次/时，十几分钟即达阈值。
+// TokenCreate 由 Token Manager 发出，每个都是平台部署，计数语义与 promote 相同。
+export async function learnTemplate(chain, address) {
+  let h;
+  try { h = await codeHashes(chain, address); } catch { h = undefined; }
+  if (!h) return;
+  // 记实现码哈希优先（平台逻辑稳定层，抗代理地址差异）；无实现则记代理/直接部署码哈希。
+  const primary = h.implHash || h.proxyHash;
+  const kind = h.implHash ? 'impl' : 'direct';
+  const count = store.bumpTemplateHash(chain, primary, kind);
+  const learn = learnedSet(chain);
+  if (count >= LEARN_THRESHOLD && !learn.has(primary)) {
+    learn.add(primary);
+    log.info({ chain, hash: primary, kind, count }, '新模板已学习');
+  }
+}
+
+// promote 时调用：只记近 24h「哈希未知」比例供 health（不再计数，计数已移到 TokenCreate 抽样）。
+// 返回 promote 时是否「已知模板」。
+export async function recordPromotedTemplate(chain, address) {
   let h;
   try { h = await codeHashes(chain, address); } catch { h = undefined; }
   const known = !!h && whitelisted(chain, [h.proxyHash, h.implHash]);
   recentPromotes.push({ ts: Date.now(), known });
-  if (h) {
-    // 记实现码哈希优先（平台逻辑稳定层，抗代理地址差异）；无实现则记代理/直接部署码哈希。
-    const primary = h.implHash || h.proxyHash;
-    const kind = h.implHash ? 'impl' : 'direct';
-    const count = store.bumpTemplateHash(chain, primary, kind);
-    const learn = learnedSet(chain);
-    if (count >= LEARN_THRESHOLD && !learn.has(primary)) {
-      learn.add(primary);
-      log.info({ chain, hash: primary, kind, count }, '新模板已学习');
-    }
-  }
   return known;
 }
 

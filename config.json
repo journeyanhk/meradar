@@ -61,7 +61,9 @@
         "0xbb6d668c425d9a1fa95dc0378c651bde6aae03ec03f861338211b55d14aa483e",
         "0x01f0430e2bbc285e7a55cc7409977eccb1b7b944068956cffcb7dac5c75b3d1f",
         "0x49052d1fff3ba35008538f6694480d71469a0a76c82ce47d0500cab6e8775f6d",
-        "0xa5529c201b5fdf90cdcddd546521c4e75374e47fdb1aa356859307a4532da97f"
+        "0xa5529c201b5fdf90cdcddd546521c4e75374e47fdb1aa356859307a4532da97f",
+        "0x1210dbadb4a9a84de0a99de0b17d70f917aa61bfc53711787d0ac0bf12d716ea",
+        "0xd70563a4d347f818aa2471d9769ebadb8ddfcacdf0bcfd5105a6fe296e17c293"
       ],
       "quoteTokens": {
         "WBNB": { "address": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c", "decimals": 18 },
