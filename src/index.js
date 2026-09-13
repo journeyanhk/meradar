@@ -3,6 +3,7 @@ import { startServer } from './server.js';
 import { startEngine, backfillRecentCreates } from './engine.js';
 import { httpClient } from './chain.js';
 import { refreshBnbUsd, getBnbUsd } from './enrich.js';
+import { refreshDynamicQuotes } from './quotePrice.js';
 import { probeStateOverride } from './rpccap.js';
 import { store } from './db.js';
 import * as momentum from './momentum.js';
@@ -48,6 +49,9 @@ async function main() {
       logger.info({ chain, bnbUsd: getBnbUsd(chain) }, 'BNB 现价已就绪');
       setInterval(() => refreshBnbUsd(chain).catch(() => {}), 60_000);
     }
+    // 动态报价币美元价：先刷一遍已登记的（重启热启），之后每 60s 复价过期项（$5000 流动性下限）
+    await refreshDynamicQuotes(chain).catch(() => {});
+    setInterval(() => refreshDynamicQuotes(chain).catch(() => {}), 60_000);
   }
 
   // 快照清理：按 snapshotRetentionDays 保留，每小时清一次

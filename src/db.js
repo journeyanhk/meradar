@@ -99,6 +99,30 @@ CREATE TABLE IF NOT EXISTS template_hashes (
   count      INTEGER DEFAULT 0,
   PRIMARY KEY (chain, hash)
 );
+
+-- 动态报价币登记：Four.meme 现允许任意代币做曲线报价(如 SpaceX 股票代币 SPCXB)。首次遇到不认识的
+-- 报价币时读链上 symbol/decimals 落库，重启后免再读；判定「已知报价币」= config.quoteTokens ∪ 本表。
+CREATE TABLE IF NOT EXISTS quote_tokens (
+  chain      TEXT NOT NULL,
+  address    TEXT NOT NULL,
+  symbol     TEXT,
+  decimals   INTEGER,
+  first_seen INTEGER,
+  PRIMARY KEY (chain, address)
+);
+
+-- 动态报价币美元价缓存：扫 V2/V3(vs USDT/WBNB)取流动性最大的池定价，60 秒刷新，落库供重启热启。
+-- priced=0 表示流动性低于下限、价格不可信 → 卡片显示「报价币 X · 无可信价格」而非全 0。
+CREATE TABLE IF NOT EXISTS quote_prices (
+  chain        TEXT NOT NULL,
+  address      TEXT NOT NULL,
+  price_usd    REAL,
+  liquidity_usd REAL,
+  priced       INTEGER DEFAULT 0,
+  source       TEXT,
+  updated_at   INTEGER,
+  PRIMARY KEY (chain, address)
+);
 `);
 
 // 幂等迁移：node:sqlite 错误信息少，用 PRAGMA table_info 判断列是否存在再 ADD COLUMN，
@@ -204,6 +228,10 @@ const stmt = {
   bumpTemplateHash: db.prepare(`INSERT INTO template_hashes (chain, hash, kind, first_seen, count) VALUES (@chain, @hash, @kind, @ts, 1) ON CONFLICT(chain, hash) DO UPDATE SET count = count + 1`),
   getTemplateHashCount: db.prepare(`SELECT count FROM template_hashes WHERE chain=? AND hash=?`),
   learnedTemplateHashes: db.prepare(`SELECT hash FROM template_hashes WHERE chain=? AND count>=?`),
+  upsertQuoteToken: db.prepare(`INSERT INTO quote_tokens (chain, address, symbol, decimals, first_seen) VALUES (@chain, @address, @symbol, @decimals, @ts) ON CONFLICT(chain, address) DO UPDATE SET symbol=@symbol, decimals=@decimals`),
+  allQuoteTokens: db.prepare(`SELECT chain, address, symbol, decimals FROM quote_tokens`),
+  upsertQuotePrice: db.prepare(`INSERT INTO quote_prices (chain, address, price_usd, liquidity_usd, priced, source, updated_at) VALUES (@chain, @address, @price_usd, @liquidity_usd, @priced, @source, @updated_at) ON CONFLICT(chain, address) DO UPDATE SET price_usd=@price_usd, liquidity_usd=@liquidity_usd, priced=@priced, source=@source, updated_at=@updated_at`),
+  allQuotePrices: db.prepare(`SELECT chain, address, price_usd, liquidity_usd, priced, updated_at FROM quote_prices`),
 };
 
 export const store = {
@@ -265,4 +293,11 @@ export const store = {
     return stmt.getTemplateHashCount.get(chain, h)?.count ?? 0;
   },
   learnedTemplateHashes(chain, minCount) { return stmt.learnedTemplateHashes.all(chain, minCount).map((r) => r.hash); },
+  // 动态报价币登记 + 美元价缓存（quotePrice.js 用）。
+  registerQuoteToken(chain, address, symbol, decimals) {
+    stmt.upsertQuoteToken.run({ chain, address: String(address).toLowerCase(), symbol, decimals, ts: Date.now() });
+  },
+  quoteTokens() { return stmt.allQuoteTokens.all(); },
+  setQuotePrice(p) { stmt.upsertQuotePrice.run({ source: null, updated_at: Date.now(), ...p, address: String(p.address).toLowerCase() }); },
+  quotePrices() { return stmt.allQuotePrices.all(); },
 };

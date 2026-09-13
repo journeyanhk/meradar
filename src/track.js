@@ -36,7 +36,7 @@ export async function pollCandidate(chain, cand) {
   // 这里在 offers 耗尽或募集达标时主动反查交易对；找不到不报错，靠下一轮 tick 重试（注入流动性有几秒~几十秒延迟）。
   if (!cand.pool && curve) {
     if (graduatedByCurve(cand, curve, quoteDec)) {
-      const found = await discoverPool(chain, cand).catch((e) => { log.debug({ err: e.message }, 'discoverPool(track)'); return false; });
+      const found = await discoverPool(chain, cand, { graduated: true }).catch((e) => { log.debug({ err: e.message }, 'discoverPool(track)'); return false; });
       if (found) cand = store.get(cand.key) || cand; // 用最新 pool/pool_type/quote_symbol 走本轮池子定价
     }
   }

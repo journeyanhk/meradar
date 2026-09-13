@@ -4,6 +4,9 @@ import { erc20Abi, pairAbi, v3PoolAbi, tokenManagerAbi } from './abi.js';
 import { chainConfig } from './config.js';
 import { recordRpcError } from './health.js';
 import { child } from './logger.js';
+// 动态报价币定价（Four.meme 允许任意代币计价，config 覆盖不到时回落到这里）。
+// 循环依赖安全：quotePrice.js 也 import 本文件的 getBnbUsd，但两侧都只在函数体内用，模块加载期不触发。
+import { lookupDynamicQuote, dynamicQuoteUsd, learnQuote } from './quotePrice.js';
 
 const log = child('enrich');
 const bnbUsdCache = new Map(); // chain -> price
@@ -47,7 +50,13 @@ export async function readTokenInfos(chain, tokenManager, tokens) {
       if (r?.status !== 'success' || !r.result) continue;
       const info = r.result; // [base, quote, template, totalSupply, maxOffers, maxRaising, launchTime, offers, funds, lastPrice, K, T, status]
       const quoteAddr = info[1];
-      const q = resolveQuote(cfg, quoteAddr);
+      let q = resolveQuote(cfg, quoteAddr);
+      // 未知报价币（config 覆盖不到，如 SPCXB 股票代币）：读链上 symbol/decimals 登记 + 定价一次，再解析。
+      // 登记后 resolveQuote 下次即命中，quoteSym 落真实符号而非 'UNKNOWN'（4FOUR 归零修复核心）。
+      if (!q && quoteAddr && !/^0x0+$/.test(String(quoteAddr))) {
+        const learned = await learnQuote(chain, quoteAddr).catch(() => null);
+        if (learned) q = { sym: learned.sym, address: learned.address, decimals: learned.decimals, dynamic: true };
+      }
       const launchSec = Number(info[6] || 0n);
       out.set(tokens[i].toLowerCase(), {
         quoteSym: q?.sym ?? 'UNKNOWN',
@@ -97,13 +106,16 @@ export function resolveQuote(cfg, symOrAddr) {
       return { sym, address: q.address, decimals: q.decimals };
     }
   }
-  return null;
+  // config 未命中 → 回落动态报价币注册表（Four.meme 允许任意代币计价，如 SPCXB 股票代币）。
+  // 尚未登记时返回 null（首次遇到，promote 时会 learnQuote 登记，下次即命中）。
+  return lookupDynamicQuote(cfg.chainId, symOrAddr);
 }
 
 function quoteUsdPrice(chain, cfg, sym) {
   if (sym === 'USDT' || sym === 'USDC' || sym === 'BUSD' || sym === 'USD1') return 1;
   if (sym === 'WBNB') return bnbUsdCache.get(chain) || cfg.wbnbUsdPriceFallback || 900;
-  return cfg.wbnbUsdPriceFallback || 1;
+  // 动态报价币（SPCXB 等）：查缓存美元价；不可信/未定价 → null，调用方按「无可信价格」处理，不再瞎套 fallback。
+  return dynamicQuoteUsd(cfg.chainId, sym);
 }
 
 // 每 60s 读一次 Pancake WBNB/USDT 池，得到 BNB 现价（只读、零成本）
@@ -151,6 +163,7 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
   if (!q) { log.debug({ quote }, '无法解析报价币，跳过池子定价'); return null; }
   const client = httpClient(chain);
   const quoteUsd = quoteUsdPrice(chain, cfg, q.sym);
+  const priced = quoteUsd != null;
   const memeDec = decimals || 18;
   const supply = totalSupply ? Number(formatUnits(totalSupply, memeDec)) : 0;
 
@@ -177,7 +190,7 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
       const priceUsd = priceInQuote * quoteUsd;
       const quoteBalHuman = Number(formatUnits(qBal, q.decimals));
       const liquidityUsd = quoteBalHuman * quoteUsd * 2;
-      return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: q.sym };
+      return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: q.sym, priced };
     }
 
     // V2
@@ -193,7 +206,7 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
     const tokenReserve = Number(formatUnits(quoteIsT0 ? reserves[1] : reserves[0], memeDec));
     const liquidityUsd = quoteReserve * quoteUsd * 2;
     const priceUsd = tokenReserve > 0 ? (quoteReserve * quoteUsd) / tokenReserve : 0;
-    return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: q.sym };
+    return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: q.sym, priced };
   } catch (e) {
     recordRpcError();
     log.warn({ err: e.message, pool, poolType }, '读取池子指标失败');

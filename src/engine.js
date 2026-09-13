@@ -34,10 +34,10 @@ function tokenManagerAddr(chain) {
 // 单位换算用「该币自己的报价币」，不再一律按 BNB —— 否则 USDT 曲线会被放大约一个 BNB 价格的倍数。
 function recordCurveTrade(t, cand) {
   const q = resolveQuote(chainConfig(t.chain), cand.quote_symbol);
-  if (!q) return; // 报价币未知 → 不定价、不落库（宁可晚 10 秒等 _tokenInfos 解析）
-  const qp = quoteUsd(t.chain, q.sym);
+  if (!q) return; // 报价币未知 → 不定价、不落库（宁可晚 10 秒等 _tokenInfos/learnQuote 解析）
+  const qp = quoteUsd(t.chain, q.sym); // 动态报价币不可信/未定价时为 null
   const div = 10 ** q.decimals;
-  const usd = t.cost != null ? (Number(t.cost) / div) * qp : 0;
+  const usd = (t.cost != null && qp != null) ? (Number(t.cost) / div) * qp : 0; // 无可信价 → usd=0，但仍计买家
   const tokenHuman = t.amount != null ? Number(t.amount) / 1e18 : 0; // meme 代币固定 18 位
   const side = t.isBuy ? 'buy' : 'sell';
   const ts = t.ts || Date.now();
@@ -197,7 +197,8 @@ async function onSwap(sw) {
   if (!cand || cand.status !== 'active') return;
   const isBuy = sw.side === 'buy';
   momentum.onTrade({ token: sw.address, account: isBuy ? sw.account : null, isBuy, ts: sw.ts });
-  const usd = (sw.quoteHuman || 0) * quoteUsd(sw.chain, sw.quoteSym);
+  const qp = quoteUsd(sw.chain, sw.quoteSym); // 动态报价币不可信/未定价时为 null
+  const usd = qp != null ? (sw.quoteHuman || 0) * qp : 0;
   const price = sw.tokenHuman > 0 ? usd / sw.tokenHuman : 0;
   const supply = supplyHumanOf(cand);
   store.addTrade({
