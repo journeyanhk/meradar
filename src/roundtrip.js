@@ -3,8 +3,8 @@
 // 运行时字节码注入固定地址 CHECKER 并覆写其余额提供 msg.value，在 RPC 内存里真实跑一遍买入→approve→卖出。
 // 结果状态：ok / buyReverted(→WAIT，可能未开交易) / noTokens(→WAIT) / sellReverted(→REJECT，疑似貔貅)
 //          / unsupported(RPC 不支持 或 V3 未实现 →回落 GoPlus/WAIT) / error。
-import { encodeFunctionData, decodeFunctionResult, parseEther, getAddress } from 'viem';
-import { CHECKER_RUNTIME, CHECKER_ABI, CHECKER_V3_RUNTIME, CHECKER_V3_ABI } from './roundtrip-bytecode.js';
+import { encodeFunctionData, decodeFunctionResult, parseEther, getAddress, keccak256, encodeAbiParameters, pad } from 'viem';
+import { CHECKER_RUNTIME, CHECKER_ABI, CHECKER_V3_RUNTIME, CHECKER_V3_ABI, CHECKER_V3E_RUNTIME, CHECKER_V3E_ABI } from './roundtrip-bytecode.js';
 import { httpClient } from './chain.js';
 import { chainConfig } from './config.js';
 import { resolveQuote } from './enrich.js';
@@ -15,6 +15,7 @@ import { child } from './logger.js';
 const log = child('roundtrip');
 const CHECKER = getAddress('0x00000000000000000000000000000000cafe0002');
 const CHECKER_V3 = getAddress('0x00000000000000000000000000000000cafe0003');
+const CHECKER_V3E = getAddress('0x00000000000000000000000000000000cafe0004');
 const DEFAULT_AMOUNT_IN = parseEther('0.02'); // 小额 0.02 BNB：够穿透曲线毕业池，又不至于严重滑点污染税率
 const TTL = 10 * 60_000;
 const cache = new Map(); // `${chain}:${addr}` -> { ts, result }
@@ -96,15 +97,14 @@ export async function roundTripCheck(chain, cand, { amountIn = DEFAULT_AMOUNT_IN
   });
 }
 
-// V3 往返：Uniswap V3 / SwapRouter02 形态（Arc 主力，BSC 直发 V3 少量）。
-// 用原生币 msg.value 经 SwapRouter 包装成 wrappedNative 买 token，再全额换回，按 wrappedNative 余额差计回收。
-// 仅在池子一侧为「包装原生币」时适用；Arc 的 USDC(6位) 计价买入需覆写 ERC20 余额槽，属后续(9/16 主网)工作。
-// V3 无 fee-on-transfer 变体，貔貅/高税会让某腿 revert：买入 revert→WAIT，卖出 revert→REJECT。
+// V3 往返调度：读池 fee/token0/token1，判定报价币在哪一侧，按报价币形态选路径。
+//   报价币=包装原生币           → 原生 msg.value 路径(checkV3, SwapRouter02 形态)     —— BSC V3
+//   报价币=原生余额 ERC-20 视图  → ERC-20 路径 + 覆写 CHECKER 原生余额(无需槽探测)      —— Arc USDC
+//   报价币=普通 ERC-20 且配 balanceSlot → ERC-20 路径 + 覆写余额槽                     —— BSC USDT 计价 V3(日后)
+//   其余                        → unsupported(回落 GoPlus/WAIT)
 async function roundTripV3(chain, cand, cfg, amountIn) {
   const swapRouter = cfg.swapRouterV3;
-  const wrapped = cfg.wrappedNative || cfg.quoteTokens?.WBNB?.address;
   if (!swapRouter || /^0x0+$/.test(swapRouter)) return { status: 'unsupported', note: 'V3 SwapRouter 未配置(Arc 主网 9/16 填)' };
-  if (!wrapped || /^0x0+$/.test(wrapped)) return { status: 'unsupported', note: '包装原生币未配置' };
   if (!cand.pool) return { status: 'unsupported', note: 'V3 池未知' };
 
   const client = httpClient(chain);
@@ -120,13 +120,27 @@ async function roundTripV3(chain, cand, cfg, amountIn) {
     return { status: 'error', note: 'V3 池 fee/token 读取失败' };
   }
 
-  const wl = getAddress(wrapped).toLowerCase();
-  if (token0.toLowerCase() !== wl && token1.toLowerCase() !== wl) {
-    return { status: 'unsupported', note: 'V3 池非包装原生币计价，原生买入不适用(Arc USDC 计价待 ERC20 余额覆写)' };
+  const token = getAddress(cand.address);
+  const tk = token.toLowerCase();
+  // 报价币 = 池中「非目标 token」的那一侧
+  const quoteAddr = token0.toLowerCase() === tk ? token1 : (token1.toLowerCase() === tk ? token0 : null);
+  if (!quoteAddr) return { status: 'unsupported', note: 'V3 池两侧均非目标 token' };
+
+  const wrapped = cfg.wrappedNative || cfg.quoteTokens?.WBNB?.address;
+  const wrappedOk = wrapped && !/^0x0+$/.test(wrapped);
+
+  // A) 包装原生币计价 → 原生 msg.value 路径
+  if (wrappedOk && quoteAddr.toLowerCase() === wrapped.toLowerCase()) {
+    return roundTripV3Native(client, getAddress(swapRouter), getAddress(wrapped), token, Number(fee), amountIn);
   }
 
-  const token = getAddress(cand.address);
-  const data = encodeFunctionData({ abi: CHECKER_V3_ABI, functionName: 'checkV3', args: [getAddress(swapRouter), getAddress(wrapped), token, Number(fee)] });
+  // B/C) ERC-20 报价币
+  return roundTripV3Erc20(cfg, client, getAddress(swapRouter), quoteAddr, token, Number(fee));
+}
+
+// A) 原生 msg.value 路径（SwapRouter02 形态，无 deadline）：BSC WBNB 计价 V3 池。
+async function roundTripV3Native(client, swapRouter, wrapped, token, fee, amountIn) {
+  const data = encodeFunctionData({ abi: CHECKER_V3_ABI, functionName: 'checkV3', args: [swapRouter, wrapped, token, fee] });
   let ret;
   try {
     const { data: out } = await client.call({
@@ -135,10 +149,9 @@ async function roundTripV3(chain, cand, cfg, amountIn) {
     });
     ret = decodeFunctionResult({ abi: CHECKER_V3_ABI, functionName: 'checkV3', data: out });
   } catch (e) {
-    log.debug({ err: e.shortMessage || e.message, token: cand.symbol }, 'roundTripV3 eth_call 失败');
+    log.debug({ err: e.shortMessage || e.message }, 'roundTripV3(native) eth_call 失败');
     return { status: 'error', note: (e.shortMessage || e.message || '').slice(0, 160) };
   }
-
   const code = Number(ret[0]);
   const gotBuy = ret[1];
   const gotSell = ret[2];
@@ -146,12 +159,72 @@ async function roundTripV3(chain, cand, cfg, amountIn) {
   if (code === 2) return { status: 'noTokens', note: '买到 0 代币' };
   if (code === 3) return { status: 'sellReverted', gotBuy: gotBuy.toString(), note: '卖出 revert(疑似貔貅)' };
   return {
-    status: 'ok',
-    gotBuy: gotBuy.toString(),
-    gotSell: gotSell.toString(),
-    buyTaxBps: null, // V3 理论税需 QuoterV2；最小适配只给回收率，税率留待后续
-    sellTaxBps: null,
+    status: 'ok', gotBuy: gotBuy.toString(), gotSell: gotSell.toString(),
+    buyTaxBps: null, sellTaxBps: null, // V3 理论税需 Quoter；最小适配只给回收率
     recoveredBps: amountIn > 0n ? Number((gotSell * 10000n) / amountIn) : null,
-    feeTier: Number(fee),
+    feeTier: fee,
   };
+}
+
+// B/C) ERC-20 报价币路径（SwapRouter v1 形态，带 deadline）：Arc UnitFlow USDC 计价池。
+// 余额注入两种：native(Arc USDC=原生余额视图)覆写原生 balance；否则按配置 balanceSlot 覆写存储槽。
+async function roundTripV3Erc20(cfg, client, swapRouter, quoteAddr, token, fee) {
+  const routerKind = cfg.routerKind || 'swaprouter02';
+  if (routerKind !== 'v3-router-v1') {
+    // 目前 ERC-20 往返只实现 v1 路由形态(Arc UnitFlow)。SwapRouter02 ERC-20 待主网 DEX 确定后补分支。
+    return { status: 'unsupported', note: `ERC-20 报价往返暂仅支持 routerKind=v3-router-v1(实得 ${routerKind})` };
+  }
+  const q = quoteEntryByAddress(cfg, quoteAddr);
+  if (!q) return { status: 'unsupported', note: 'V3 池报价币未在 quoteTokens 配置' };
+
+  const probeIn = 5n * 10n ** BigInt(q.decimals); // 5 个报价币单位的探针额度
+  let stateOverride;
+  if (q.native) {
+    // Arc：USDC 是原生余额的 ERC-20 视图 → 覆写 CHECKER 原生余额即等于给它 USDC（原生 18 位 = 视图 decimals 位 × 1e(18-dec)）。
+    const nativeBal = probeIn * 10n ** BigInt(18 - q.decimals) + parseEther('1');
+    stateOverride = [{ address: CHECKER_V3E, code: CHECKER_V3E_RUNTIME, balance: nativeBal }];
+  } else if (q.balanceSlot != null) {
+    // 普通 ERC-20：覆写 balanceOf 映射槽 keccak256(abi.encode(holder, slot))=probeIn；原生 balance 给点 gas 兜底。
+    const slotKey = keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [CHECKER_V3E, BigInt(q.balanceSlot)]));
+    stateOverride = [
+      { address: CHECKER_V3E, code: CHECKER_V3E_RUNTIME, balance: parseEther('1') },
+      { address: getAddress(quoteAddr), stateDiff: [{ slot: slotKey, value: pad(`0x${probeIn.toString(16)}`) }] },
+    ];
+  } else {
+    return { status: 'unsupported', note: 'ERC-20 报价币未标注 native/balanceSlot，无法注入余额' };
+  }
+
+  const data = encodeFunctionData({
+    abi: CHECKER_V3E_ABI, functionName: 'checkV3Erc20',
+    args: [swapRouter, getAddress(quoteAddr), token, fee, probeIn],
+  });
+  let ret;
+  try {
+    const { data: out } = await client.call({ to: CHECKER_V3E, account: CHECKER_V3E, data, stateOverride });
+    ret = decodeFunctionResult({ abi: CHECKER_V3E_ABI, functionName: 'checkV3Erc20', data: out });
+  } catch (e) {
+    log.debug({ err: e.shortMessage || e.message }, 'roundTripV3(erc20) eth_call 失败');
+    return { status: 'error', note: (e.shortMessage || e.message || '').slice(0, 160) };
+  }
+  const code = Number(ret[0]);
+  const gotBuy = ret[1];
+  const gotSell = ret[2];
+  if (code === 1) return { status: 'buyReverted', note: '买入 revert(可能未开池/反机器人)' };
+  if (code === 2) return { status: 'noTokens', note: '买到 0 代币' };
+  if (code === 3) return { status: 'sellReverted', gotBuy: gotBuy.toString(), note: '卖出 revert(疑似貔貅)' };
+  return {
+    status: 'ok', gotBuy: gotBuy.toString(), gotSell: gotSell.toString(),
+    buyTaxBps: null, sellTaxBps: null, // 理论税需 v1 Quoter；最小适配只给回收率
+    recoveredBps: probeIn > 0n ? Number((gotSell * 10000n) / probeIn) : null,
+    feeTier: fee, quoteSym: q.sym,
+  };
+}
+
+// 取 quoteTokens 里匹配某地址的配置项（含 native/balanceSlot，resolveQuote 会丢弃这两字段故单独取）。
+function quoteEntryByAddress(cfg, addr) {
+  const s = String(addr).toLowerCase();
+  for (const [sym, q] of Object.entries(cfg.quoteTokens || {})) {
+    if (q.address?.toLowerCase() === s) return { sym, address: q.address, decimals: q.decimals, native: !!q.native, balanceSlot: q.balanceSlot };
+  }
+  return null;
 }

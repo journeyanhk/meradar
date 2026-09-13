@@ -11,6 +11,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const units = [
   { file: 'RoundTripChecker.sol', contract: 'RoundTripChecker', runtimeConst: 'CHECKER_RUNTIME', abiConst: 'CHECKER_ABI' },
   { file: 'RoundTripCheckerV3.sol', contract: 'RoundTripCheckerV3', runtimeConst: 'CHECKER_V3_RUNTIME', abiConst: 'CHECKER_V3_ABI' },
+  { file: 'RoundTripCheckerV3Erc20.sol', contract: 'RoundTripCheckerV3Erc20', runtimeConst: 'CHECKER_V3E_RUNTIME', abiConst: 'CHECKER_V3E_ABI' },
 ];
 
 const input = {

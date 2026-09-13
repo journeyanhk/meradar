@@ -101,22 +101,26 @@
       "goplusId": "",
       "name": "Arc Testnet",
       "nativeSymbol": "USDC",
-      "swapRouterV3": "0x0000000000000000000000000000000000000000",
+      "swapRouterV3": "0x509cF58CdA08C7aee83a2BdBb4A1Eac907343D01",
+      "routerKind": "v3-router-v1",
+      "quoterV3": "0x121aeB6DEf00F6F67665008CaC1C19805886ed1a",
       "wrappedNative": "0x0000000000000000000000000000000000000000",
       "explorer": "https://testnet.arcscan.app",
       "gmgnBase": "",
       "wbnbUsdPriceFallback": 1,
+      "allowUnverifiedStrong": false,
       "quoteTokens": {
-        "USDC": { "address": "0x3600000000000000000000000000000000000000", "decimals": 6 }
+        "USDC": { "address": "0x3600000000000000000000000000000000000000", "decimals": 6, "native": true },
+        "WUSDC": { "address": "0x911b4000D3422F482F4062a913885f7b035382Df", "decimals": 18 }
       },
       "launchpads": [
         {
           "id": "arc-uniV3",
           "type": "amm-v3",
-          "label": "Uniswap V3 (Arc)",
-          "address": "0x0000000000000000000000000000000000000000",
+          "label": "UnitFlowV3 (Arc Testnet)",
+          "address": "0xAb6A8AAb7d490007634ef59d424b5d89688a1971",
           "event": "event PoolCreated(address indexed token0, address indexed token1, uint24 indexed fee, int24 tickSpacing, address pool)",
-          "note": "Arc 测试网 Uniswap V3 工厂地址待从 arcscan 核实后填入；主网 9/16 后新增 arcMainnet。Arc 无 Four.meme 式单一 Token Manager，动量走 V3 Swap 事件。往返检查：填 swapRouterV3(Uniswap SwapRouter02)+wrappedNative(包装USDC)后走 V3 分支；注意 USDC ERC20 为 6 位小数(原生 gas 18 位)，quoteTokens.USDC.decimals 已钉 6。若池按 USDC 计价而无包装原生币腿，往返返回 unsupported，待补 ERC20 余额槽覆写。"
+          "note": "Arc 测试网 V3 兼容 AMM(UnitFlowV3，ACTFUN 配套第三方部署，仅演练；主网非此地址)。路由是 SwapRouter v1 形态(exactInputSingle 带 deadline，selector 0x414bf389)→ routerKind=v3-router-v1。报价币 USDC(0x3600…) 是原生余额的 ERC-20 视图(6位)，往返走 checkV3Erc20 + 覆写原生余额(无需槽探测)；WUSDC(0x911b…,18位)是第三方包装，若池按 WUSDC 计价另配。主网 9/16 后大概率是 Uniswap v4(PoolManager 0x8366…)，需 v4 适配器，测试网无 v4 可测(靶场在 Robinhood Chain)。"
         }
       ]
     }
