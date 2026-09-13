@@ -327,9 +327,20 @@ test('goplus N/A 字段：曲线期空字段记入 naFields，供三态回落 WA
 // 优先级：GoPlus 显式正例 → 曲线期模板 → 毕业后往返 → GoPlus 补位。buyReverted/noTokens 一律 WAIT。
 const cleanGp = { isHoneypot: false, cannotSellAll: false, sellTaxBps: 300, naFields: [] };
 
-test('真值表①：GoPlus 貔貅 -> REJECT（即便毕业往返 ok，纵深防御优先）', () => {
+test('真值表①：GoPlus 貔貅但毕业往返 ok -> WAIT(数据冲突)，往返是真实执行不被快照误杀', () => {
   const r = classifyTradeSafety({
     graduated: true, roundTrip: { status: 'ok', sellTaxBps: 0 },
+    goplus: { isHoneypot: true, cannotSellAll: false, sellTaxBps: 0, naFields: [] },
+  });
+  assert.equal(r.state, 'WAIT');
+  assert.equal(r.source, 'conflict');
+  assert.equal(r.capTier, 'T1');
+  assert.ok(r.softFlags?.includes('数据冲突'));
+});
+
+test('真值表①b：GoPlus 貔貅且无往返可对质(曲线期) -> REJECT(采信 GoPlus)', () => {
+  const r = classifyTradeSafety({
+    graduated: false, templateMatch: true, roundTrip: null,
     goplus: { isHoneypot: true, cannotSellAll: false, sellTaxBps: 0, naFields: [] },
   });
   assert.equal(r.state, 'REJECT');
@@ -344,12 +355,13 @@ test('真值表②：GoPlus 无法全部卖出 -> REJECT', () => {
   assert.equal(r.state, 'REJECT');
 });
 
-test('真值表③：GoPlus 卖税≥20% -> REJECT', () => {
+test('真值表③：GoPlus 卖税≥20% 且无往返可对质 -> REJECT', () => {
   const r = classifyTradeSafety({
-    graduated: true, roundTrip: { status: 'ok', sellTaxBps: 100 },
+    graduated: true, roundTrip: { status: 'unsupported' },
     goplus: { isHoneypot: false, cannotSellAll: false, sellTaxBps: 2500, naFields: [] },
   });
   assert.equal(r.state, 'REJECT');
+  assert.equal(r.source, 'goplus');
 });
 
 test('真值表④：曲线期命中平台模板 -> PASS(template)', () => {
@@ -396,6 +408,13 @@ test('真值表⑩：往返不可用 + GoPlus 关键字段 N/A -> WAIT', () => {
     goplus: { isHoneypot: false, cannotSellAll: false, sellTaxBps: 0, naFields: ['sellTax', 'isHoneypot', 'cannotSellAll'] },
   });
   assert.equal(r.state, 'WAIT');
+  assert.equal(r.capTier, 'T1');
+});
+
+test('真值表⑪：毕业中(池未接上) -> WAIT，即便字节码像模板也不 PASS 强提示', () => {
+  const r = classifyTradeSafety({ graduated: false, graduating: true, templateMatch: true, roundTrip: null, goplus: null });
+  assert.equal(r.state, 'WAIT');
+  assert.equal(r.source, 'graduating');
   assert.equal(r.capTier, 'T1');
 });
 

@@ -88,6 +88,17 @@ CREATE TABLE IF NOT EXISTS buyers (
   first_ts  INTEGER,
   PRIMARY KEY (key, account)
 );
+
+-- 平台模板哈希自学习：TokenCreate 由 Token Manager 发出即「平台部署」证据。每个 promote 的币算一次
+-- 码哈希累计频次，count≥阈值自动进白名单(写库，重启不丢)，应对 Four.meme 数天内轮换模板导致静态清单过期。
+CREATE TABLE IF NOT EXISTS template_hashes (
+  chain      TEXT NOT NULL,
+  hash       TEXT NOT NULL,
+  kind       TEXT,                 -- impl | direct
+  first_seen INTEGER,
+  count      INTEGER DEFAULT 0,
+  PRIMARY KEY (chain, hash)
+);
 `);
 
 // 幂等迁移：node:sqlite 错误信息少，用 PRAGMA table_info 判断列是否存在再 ADD COLUMN，
@@ -190,6 +201,9 @@ const stmt = {
   insertBuyer: db.prepare(`INSERT OR IGNORE INTO buyers (key, account, first_ts) VALUES (@key, @account, @first_ts)`),
   buyersForKey: db.prepare(`SELECT account FROM buyers WHERE key=?`),
   swapPools: db.prepare(`SELECT key, chain, address, decimals, pool, pool_type, quote_symbol FROM candidates WHERE status='active' AND pool IS NOT NULL`),
+  bumpTemplateHash: db.prepare(`INSERT INTO template_hashes (chain, hash, kind, first_seen, count) VALUES (@chain, @hash, @kind, @ts, 1) ON CONFLICT(chain, hash) DO UPDATE SET count = count + 1`),
+  getTemplateHashCount: db.prepare(`SELECT count FROM template_hashes WHERE chain=? AND hash=?`),
+  learnedTemplateHashes: db.prepare(`SELECT hash FROM template_hashes WHERE chain=? AND count>=?`),
 };
 
 export const store = {
@@ -244,4 +258,11 @@ export const store = {
   addBuyer(key, account, first_ts) { stmt.insertBuyer.run({ key, account: account.toLowerCase(), first_ts }); },
   buyers(key) { return stmt.buyersForKey.all(key).map((r) => r.account); },
   swapPools() { return stmt.swapPools.all(); },
+  // 模板哈希自学习：累计频次并返回最新 count；查已达阈值的哈希（供 template.js 白名单合并）。
+  bumpTemplateHash(chain, hash, kind) {
+    const h = String(hash).toLowerCase();
+    stmt.bumpTemplateHash.run({ chain, hash: h, kind, ts: Date.now() });
+    return stmt.getTemplateHashCount.get(chain, h)?.count ?? 0;
+  },
+  learnedTemplateHashes(chain, minCount) { return stmt.learnedTemplateHashes.all(chain, minCount).map((r) => r.hash); },
 };

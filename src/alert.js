@@ -132,7 +132,10 @@ function safetyLine(m) {
     if (ts.sellTaxBps != null) return `卖税 ✓ ${(ts.sellTaxBps / 100).toFixed(1)}%`;
     return '卖税 ✓ 已核验';
   }
-  if (ts.state === 'WAIT') return '卖税 未核验（退避复查）';
+  if (ts.state === 'WAIT') {
+    if (ts.softFlags?.includes('数据冲突')) return '卖税 数据冲突·待复核';
+    return '卖税 未核验（退避复查）';
+  }
   if (ts.state === 'REJECT') return `⛔ 已否决：${ts.reason || ''}`;
   return null;
 }

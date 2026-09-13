@@ -42,8 +42,9 @@ export async function pollCandidate(chain, cand) {
   }
 
   // 每轮跑三态贸易安全：曲线期查平台模板白名单，毕业后跑往返模拟（各自带缓存，重复调用廉价）。
-  // REJECT 直接置 rejected 退出；PASS/WAIT 结果连同新鲜度传入分级层封顶。
-  const ts = await scoreCandidate(chain, cand);
+  // graduating：已达毕业条件但池子尚未接上（discoverPool 有几秒~几轮延迟），此窗口不走模板 PASS，等池接上走往返。
+  const graduating = !cand.pool && !!curve && graduatedByCurve(cand, curve, quoteDec);
+  const ts = await scoreCandidate(chain, cand, { graduating });
   store.setSafety(cand.key, ts.checks);
   if (ts.veto) {
     store.setStatus(cand.key, 'rejected', ts.reason);
@@ -88,7 +89,9 @@ export async function pollCandidate(chain, cand) {
   //  · 毕业新鲜度 = graduated_at；老数据(NULL)传 0 → 视为很久以前 → 毕业腿不再单独触发 T2
   //  · 往返新鲜度 = 本轮 tradeSafety 的 checkedAt（毕业币）
   const now = Date.now();
-  const lastTradeTs = (store.lastTradeTs(cand.key) ?? momentum.lastTradeTs(cand.address)) || 0;
+  // 成交新鲜度取「多源最大值」：trades 表只含 promote 之后的成交，回填的历史成交只在内存里；
+  // 用 ?? 会被更旧的 trades 值遮住更新的内存值 —— 取 max 才不误判为不新鲜。
+  const lastTradeTs = Math.max(store.lastTradeTs(cand.key) || 0, momentum.lastTradeTs(cand.address) || 0);
   const graduatedAt = cand.graduated ? (cand.graduated_at ?? 0) : null;
 
   const metrics = {
@@ -214,9 +217,13 @@ export function startTracker() {
       const toPoll = [];
       for (const cand of actives) {
         // 归档判据用「活动」而非「市值<1」：市值为 0 可能只是价格还没重建(清洗/重启后竞态)，
-        // 会把链上仍在成交的币误踢出跟踪集。改用最后一次成交距今，多源取最新以抗竞态：
-        // trades 表(实时落库) → 内存动量(含回填) → updated_at(清洗刚触过则视为活跃)。
-        const lastTradeTs = (store.lastTradeTs(cand.key) ?? momentum.lastTradeTs(cand.address)) || cand.updated_at || 0;
+        // 会把链上仍在成交的币误踢出跟踪集。改用最后一次成交距今，多源取最大以抗竞态：
+        // trades 表(实时落库) / 内存动量(含回填) / updated_at(清洗刚触过则视为活跃)。
+        const lastTradeTs = Math.max(
+          store.lastTradeTs(cand.key) || 0,
+          momentum.lastTradeTs(cand.address) || 0,
+          cand.updated_at || 0,
+        );
         if (cand.tier === 'T0' && Date.now() - lastTradeTs > noMomentumMs) {
           store.setStatus(cand.key, 'archived', '无动量归档');
           momentum.forget(cand.address);

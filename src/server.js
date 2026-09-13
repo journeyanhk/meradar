@@ -6,6 +6,7 @@ import { store } from './db.js';
 import { bus, Events } from './bus.js';
 import { linksFor } from './alert.js';
 import { healthSnapshot } from './health.js';
+import { templateHealth } from './template.js';
 import { rpcCapabilities } from './rpccap.js';
 import { child } from './logger.js';
 
@@ -44,6 +45,7 @@ export async function startServer() {
     telegram: config.telegram.enabled, serverchan: config.serverchan.enabled,
     runtime: healthSnapshot(),
     rpcCapabilities: rpcCapabilities(),
+    template: templateHealth(), // { promoted24h, templateUnknownRate, learned } —— 未知率>5% 提示模板轮换
     time: Date.now(),
   }));
 

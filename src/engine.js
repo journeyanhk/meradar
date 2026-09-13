@@ -8,6 +8,7 @@ import { fourMemeEvents } from './abi.js';
 import { bus, Events } from './bus.js';
 import { startTracker } from './track.js';
 import { discoverPool } from './pool.js';
+import { recordTemplate } from './template.js';
 import * as momentum from './momentum.js';
 import { recordSeen, recordPromoted, recordTradeWrite, setSwapPools } from './health.js';
 import { child } from './logger.js';
@@ -120,6 +121,10 @@ async function onTrade(t) {
   // 升级：seen -> active（promote 内部保证只对 seen 生效，天然幂等）
   if (!store.promote(key)) return;
   recordPromoted();
+
+  // 模板自学习：TokenCreate 由 Token Manager 发出即「平台部署」证据，累计该币码哈希频次供白名单自学习。
+  // 先于安全打分执行，使刚跨过阈值的模板对本币的 matchesTemplate 立即生效（同时预热码哈希缓存）。
+  await recordTemplate(t.chain, t.address).catch((e) => log.debug({ err: e.message }, 'recordTemplate'));
 
   // promote 那一刻把内存买家集合整体落库；first_ts 写 0，使这批「已存量」买家不被
   // newBuyers30m(first_ts>=since) 计入，避免升级后 30 分钟内「新买家」虚高为全部买家。
