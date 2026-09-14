@@ -9,6 +9,7 @@ import { config, chainConfig } from './config.js';
 import { httpClient } from './chain.js';
 import { bus, Events } from './bus.js';
 import * as momentum from './momentum.js';
+import { forgetPoolState } from './poolstate.js';
 import { classifyTokenBuyers } from './buyer.js';
 import { child } from './logger.js';
 import { formatUnits } from 'viem';
@@ -115,9 +116,14 @@ export async function pollCandidate(chain, cand) {
   // 曲线期指标已在毕业检测前算好（curve）；毕业后用池子真实储备
   let poolM = null;
   if (cand.pool && cand.quote_symbol) {
+    // v4 集中池撤池判定需知全区间与否 → 取 v4_pools 的 tick_spacing/hooks 一并传入。
+    const v4meta = cand.pool_type === 'v4'
+      ? (store.v4PoolById(chain, cand.pool) || store.v4PoolByToken(chain, cand.address))
+      : null;
     poolM = await readPoolMetrics(chain, {
       pool: cand.pool, poolType: cand.pool_type, token, quote: cand.quote_symbol,
       decimals: cand.decimals, totalSupply: cand.total_supply ? BigInt(cand.total_supply) : null,
+      tickSpacing: v4meta?.tick_spacing ?? null, hooks: v4meta?.hooks ?? null,
     });
   }
 
@@ -132,7 +138,12 @@ export async function pollCandidate(chain, cand) {
   // —— M3-1 priceOf：统一价格来源 + 新鲜度 + 不归零护栏 ——
   // 读成功→主源(curve/amm-v*)；读失败→保旧价按 price_updated_at 判 stale；报价腿枯竭→真归零(withdrawn)；
   // >24h 未更新→unknown。数值恒为 number(保护 peak MAX 与下游数学)。
-  const px = resolvePrice({ now: Date.now(), hasPool: !!cand.pool, poolType: cand.pool_type, poolM, curve, prev });
+  // 曲线价来自内存里最后一笔成交，其新鲜度用最后成交时刻(而非 now)判定：死掉的曲线币也会灰标/未知。
+  const curveTs = momentum.lastTradeTs(cand.address) || 0;
+  const px = resolvePrice({
+    now: Date.now(), hasPool: !!cand.pool, poolType: cand.pool_type, poolM,
+    curve: curve ? { ...curve, updatedAt: curveTs } : null, prev,
+  });
   const depthUsd = px.depthUsd;
   const depthKind = px.source === 'curve' ? 'curve' : (cand.pool ? 'amm' : 'curve');
   const offersPct = curve?.offersPct ?? prev?.offers_pct ?? 0;
@@ -194,6 +205,8 @@ export async function pollCandidate(chain, cand) {
    pruneClsCache();
   }
   // 软标记/自然买家未变则不写库(每候选每轮都会进这里，避免无谓 UPDATE + updated_at 抖动)。
+  // v4 集中池「当前价位无流动性」并入软标记(与撤池区分：价格保旧、非 rug)。
+  if (poolM?.noActiveLiquidity) softFlags = { ...(softFlags || {}), noActiveLiquidity: true };
   const softFlagsJson = softFlags ? JSON.stringify(softFlags) : null;
   if ((prev?.natural_buyers_30m ?? 0) !== (naturalBuyers30m | 0) || (prev?.soft_flags ?? null) !== softFlagsJson) {
     store.setBuyerFlags(cand.key, naturalBuyers30m, softFlags);
@@ -347,7 +360,7 @@ export function startTracker() {
         if (cand.tier === 'T0' && Date.now() - lastTradeTs > noMomentumMs) {
           store.setStatus(cand.key, 'archived', '无动量归档');
           momentum.forget(cand.address);
-          if (cand.pool) bus.emit(Events.POOLS_CHANGED, { chain: cand.chain }); // 归档已毕业币需重建成交订阅
+          if (cand.pool) { forgetPoolState(cand.chain, cand.pool); bus.emit(Events.POOLS_CHANGED, { chain: cand.chain }); } // 归档已毕业币需重建成交订阅 + 清池状态
           continue;
         }
         toPoll.push(cand);

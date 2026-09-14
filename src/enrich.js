@@ -7,6 +7,7 @@ import { child } from './logger.js';
 // 动态报价币定价（Four.meme 允许任意代币计价，config 覆盖不到时回落到这里）。
 // 循环依赖安全：quotePrice.js 也 import 本文件的 getBnbUsd，但两侧都只在函数体内用，模块加载期不触发。
 import { lookupDynamicQuote, dynamicQuoteUsd, learnQuote } from './quotePrice.js';
+import { getPoolState } from './poolstate.js';
 
 const log = child('enrich');
 const bnbUsdCache = new Map(); // chain -> price
@@ -249,6 +250,18 @@ async function readV4PoolState(chain, poolManager, poolId) {
   }
 }
 
+// v4 池是否「全区间」(流动性铺满整条价格曲线)。全区间池的活跃流动性=总流动性，liquidity==0 才真撤池；
+// 集中池(非全区间)liquidity==0 只是当前 tick 无头寸。判据：hook 命中已配置发射台(Pons) 或 tickSpacing≥200。
+export function isFullRangePool(cfg, hooks, tickSpacing) {
+  const hookLc = (hooks || '').toLowerCase();
+  if (hookLc && !/^0x0+$/.test(hookLc)) {
+    for (const lp of cfg?.launchpads || []) {
+      if ((lp.hook || '').toLowerCase() === hookLc) return true;
+    }
+  }
+  return Number(tickSpacing || 0) >= 200;
+}
+
 // v4 定价/深度纯函数(无 RPC，供单测冻结断言)。sqrtPriceX96/liquidity 为 bigint。
 // price：(sqrtP/2^96)²=currency1/currency0(raw) → ×10^(dec0−dec1) 得 human → 取 quote-per-meme → ×quoteUsd。
 // depth：全区间(Pons)虚拟储备 currency0=L/sqrtP、currency1=L·sqrtP；报价腿×2。
@@ -272,7 +285,7 @@ export function computeV4Metrics({ sqrtPriceX96, liquidity, memeIsCurrency0, mem
 
 // 读池子 -> 流动性/价格/市值。支持 V2(getReserves)、V3(slot0)、v4(extsload)。
 // v4：pool 传 poolId(bytes32)、poolType='v4'；池地址=cfg.poolManagerV4。currency 排序由地址推导(原生 0x0 恒为 currency0)。
-export async function readPoolMetrics(chain, { pool, poolType, token, quote, decimals, totalSupply }) {
+export async function readPoolMetrics(chain, { pool, poolType, token, quote, decimals, totalSupply, tickSpacing = null, hooks = null }) {
   if (!pool || !quote) return null;
   const cfg = chainConfig(chain);
   const q = resolveQuote(cfg, quote);
@@ -285,15 +298,26 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
 
   try {
     if (poolType === 'v4') {
-      const st = await readV4PoolState(chain, cfg.poolManagerV4, pool);
-      if (!st) return null;
       // v4 currency 按地址升序；原生 ETH(0x0) 恒为最小 → currency0。故 meme 是否 currency0 = memeAddr < quoteAddr。
       const memeIsCurrency0 = token.toLowerCase() < q.address.toLowerCase();
+      // 事件驱动：优先用最近一笔 Swap 写入的池状态(零 RPC)；无新鲜状态才 extsload 直读。
+      const cached = getPoolState(chain, pool);
+      const st = cached || await readV4PoolState(chain, cfg.poolManagerV4, pool);
+      if (!st) return null;
       const m = computeV4Metrics({
         sqrtPriceX96: st.sqrtPriceX96, liquidity: st.liquidity, memeIsCurrency0,
         memeDec, quoteDec: q.decimals, quoteUsd, supplyHuman: supply,
       });
-      return { ...m, quoteSymbol: q.sym, priced, drained: st.liquidity === 0n };
+      // v4 的 liquidity 是「当前 tick 活跃流动性」：全区间池(Pons hook / tickSpacing≥200)为 0 才是真撤池；
+      // 集中池价格走出所有头寸区间时也会是 0 但资金仍在 → 标 noActiveLiquidity、保旧价，不误判为 rug。
+      const empty = st.liquidity === 0n;
+      const fullRange = isFullRangePool(cfg, hooks, tickSpacing);
+      return {
+        ...m, quoteSymbol: q.sym, priced,
+        drained: empty && fullRange,
+        noActiveLiquidity: empty && !fullRange,
+        updatedAt: cached ? st.ts : Date.now(), source: cached ? 'event' : 'rpc',
+      };
     }
 
     if (poolType === 'v3') {

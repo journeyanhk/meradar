@@ -10,6 +10,7 @@ import { startTracker } from './track.js';
 import { discoverPool } from './pool.js';
 import { learnTemplate, recordPromotedTemplate } from './template.js';
 import * as momentum from './momentum.js';
+import { recordPoolState } from './poolstate.js';
 import { recordSeen, recordPromoted, recordTradeWrite, setSwapPools } from './health.js';
 import { child } from './logger.js';
 import { formatUnits } from 'viem';
@@ -204,6 +205,10 @@ async function onSwap(sw) {
   const key = `${sw.chain}:${sw.address.toLowerCase()}`;
   const cand = store.get(key);
   if (!cand || cand.status !== 'active') return;
+  // 事件驱动定价：v4 Swap 自带 sqrtPriceX96+liquidity → 写 poolState，track 本轮直接据此算价、跳过 extsload。
+  if (sw.poolType === 'v4' && sw.pool && sw.sqrtPriceX96 != null && sw.liquidity != null) {
+    recordPoolState(sw.chain, sw.pool, { sqrtPriceX96: sw.sqrtPriceX96, liquidity: sw.liquidity, tick: sw.tick, ts: sw.ts });
+  }
   const isBuy = sw.side === 'buy';
   momentum.onTrade({ token: sw.address, account: isBuy ? sw.account : null, isBuy, ts: sw.ts });
   const qp = quoteUsd(sw.chain, sw.quoteSym); // 动态报价币不可信/未定价时为 null

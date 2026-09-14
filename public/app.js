@@ -89,6 +89,11 @@ function cardHtml(d) {
   if (d.copycats >= 3) tags.push(`<span class="tag">仿盘${d.copycats}</span>`);
   const badges = [`<span class="badge ${d.tier}">${d.tier}</span>`];
   if (d.graduated) badges.push('<span class="badge grad">毕业</span>');
+  // M3-1b 价格新鲜度/撤池状态：撤池(真归零) > 价格未知(>24h) > 陈旧(>10min)，只显最严重一档。
+  if (d.liquidityWithdrawn) badges.push('<span class="badge withdrawn">已撤池</span>');
+  else if (d.priceUnknown) badges.push('<span class="badge unknown">价格未知</span>');
+  else if (d.priceStale) badges.push(`<span class="badge stale">更新于${ago(d.priceUpdatedAt)}前</span>`);
+  if (d.softFlags && d.softFlags.noActiveLiquidity) badges.push('<span class="badge noliq">当前价位无流动性</span>');
   const links = Object.entries(d.links || {}).map(([k, v]) => `<a href="${v}" target="_blank" rel="noopener">${k}</a>`).join('');
   const net = +d.netIn30m || 0;
   const netCls = net > 0 ? 'pos' : net < 0 ? 'neg' : '';

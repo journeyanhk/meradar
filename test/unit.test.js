@@ -11,6 +11,8 @@ import { graduatedByCurve } from '../src/pool.js';
 import { goplusCheck } from '../src/goplus.js';
 import { classifyAccount, classifyTokenBuyers, taxPositive, BUYER_DEFAULTS } from '../src/buyer.js';
 import { resolvePrice, sourceOf, PRICE_STALE_MS, PRICE_UNKNOWN_MS } from '../src/price.js';
+import { isFullRangePool } from '../src/enrich.js';
+import { recordPoolState, getPoolState, forgetPoolState } from '../src/poolstate.js';
 
 // —— 1. Four.meme 事件签名的 topic0 必须与真实链上日志一致 ——
 // 这些 topic0 来自实际观测（见 review 报告）。类型排错会导致 selector 变化。
@@ -832,4 +834,64 @@ test('M3-1 resolvePrice：数值字段恒为 number（不返回 null，保护下
   assert.equal(typeof px.priceUsd, 'number');
   assert.equal(typeof px.depthUsd, 'number');
   assert.equal(typeof px.marketCapUsd, 'number');
+});
+
+// —— M3-1b：曲线新鲜度按最后成交时刻、v4 集中池 noActiveLiquidity、事件驱动池状态 ——
+
+test('M3-1b resolvePrice：曲线价但最后成交 >10min → stale（死币灰标）', () => {
+  const now = 9_000_000;
+  const curve = { priceUsd: 0.001, fundsUsd: 3000, marketCapUsd: 100000, updatedAt: now - (PRICE_STALE_MS + 1) };
+  const px = resolvePrice({ now, hasPool: false, poolType: null, poolM: null, curve, prev: null });
+  assert.equal(px.priceUsd, 0.001, '价仍在（无新成交不会变）');
+  assert.equal(px.source, 'curve');
+  assert.equal(px.state, 'stale');
+  assert.equal(px.updatedAt, curve.updatedAt, 'updatedAt=最后成交时刻，非 now');
+});
+
+test('M3-1b resolvePrice：曲线价但最后成交 >24h → unknown', () => {
+  const now = 9_000_000_000;
+  const curve = { priceUsd: 0.001, fundsUsd: 3000, marketCapUsd: 100000, updatedAt: now - (PRICE_UNKNOWN_MS + 1) };
+  const px = resolvePrice({ now, hasPool: false, poolType: null, poolM: null, curve, prev: null });
+  assert.equal(px.state, 'unknown');
+});
+
+test('M3-1b resolvePrice：v4 集中池当前 tick 无流动性(noActiveLiquidity) → 保旧价，不 withdrawn', () => {
+  const now = 10_000_000;
+  const prev = { price_usd: 0.02, market_cap_usd: 300000, depth_usd: 8000, price_source: 'amm-v4', price_updated_at: now - 30_000 };
+  const poolM = { priceUsd: 0.02, liquidityUsd: 0, marketCapUsd: 300000, priced: true, drained: false, noActiveLiquidity: true };
+  const px = resolvePrice({ now, hasPool: true, poolType: 'v4', poolM, curve: null, prev });
+  assert.equal(px.priceUsd, 0.02, '保旧价');
+  assert.equal(px.depthUsd, 8000);
+  assert.notEqual(px.state, 'withdrawn', '不误判为撤池');
+  assert.equal(px.state, 'ok');
+});
+
+test('M3-1b isFullRangePool：Pons hook 命中 或 tickSpacing≥200 才算全区间', () => {
+  const cfg = { launchpads: [{ hook: '0xE5E702641EA86f4AE6CC3cDAeD2b886F976bE044' }] };
+  assert.equal(isFullRangePool(cfg, '0xe5e702641ea86f4ae6cc3cdaed2b886f976be044', null), true, 'Pons hook 命中(大小写无关)');
+  assert.equal(isFullRangePool(cfg, null, 200), true, 'tickSpacing≥200');
+  assert.equal(isFullRangePool(cfg, null, 60), false, '窄 tickSpacing → 集中池');
+  assert.equal(isFullRangePool(cfg, '0x0000000000000000000000000000000000000000', 10), false, '无 hook + 窄间距');
+});
+
+test('M3-1b poolState：新鲜(<60s)可取，陈旧返回 null', () => {
+  const now = Date.now();
+  forgetPoolState('robinhood', '0xpoolid');
+  recordPoolState('robinhood', '0xPoolId', { sqrtPriceX96: 123n, liquidity: 456n, tick: 7, ts: now });
+  const fresh = getPoolState('robinhood', '0xpoolid');
+  assert.ok(fresh, '刚写入 → 新鲜');
+  assert.equal(fresh.sqrtPriceX96, 123n);
+  assert.equal(fresh.liquidity, 456n);
+  assert.equal(getPoolState('robinhood', '0xpoolid', 1000), fresh, '默认阈内可取');
+  // 手动写一条 2 分钟前的 → 陈旧
+  recordPoolState('robinhood', '0xpoolid', { sqrtPriceX96: 1n, liquidity: 1n, ts: now - 120_000 });
+  assert.equal(getPoolState('robinhood', '0xpoolid'), null, '陈旧 → null(回退 RPC)');
+  forgetPoolState('robinhood', '0xpoolid');
+  assert.equal(getPoolState('robinhood', '0xpoolid', 1e9), null, 'forget 后取不到');
+});
+
+test('M3-1b poolState：缺 sqrtPriceX96/liquidity 不写入（不覆盖旧值）', () => {
+  forgetPoolState('c', '0xp');
+  recordPoolState('c', '0xp', { sqrtPriceX96: null, liquidity: 5n });
+  assert.equal(getPoolState('c', '0xp', 1e9), null);
 });
