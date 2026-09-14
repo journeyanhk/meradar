@@ -43,7 +43,7 @@ function recordCurveTrade(t, cand) {
   const ts = t.ts || Date.now();
   const price = tokenHuman > 0 ? usd / tokenHuman : 0;
   const supply = supplyHumanOf(cand);
-  store.addTrade({ key: cand.key, ts, side, account: t.account, quote_amount: usd, token_amount: tokenHuman, price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null, fee_raw: t.fee != null ? t.fee.toString() : null, tax_raw: t.tax != null ? t.tax.toString() : null });
+  store.addTrade({ key: cand.key, ts, side, account: t.account, quote_amount: usd, token_amount: tokenHuman, price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null, fee_raw: t.fee != null ? t.fee.toString() : null, tax_raw: t.tax != null ? t.tax.toString() : null, block: t.block ?? null });
   if (side === 'buy' && t.account) store.addBuyer(cand.key, t.account, ts);
   recordTradeWrite();
 }
@@ -211,7 +211,7 @@ async function onSwap(sw) {
   store.addTrade({
     key, ts: sw.ts, side: sw.side, account: sw.account,
     quote_amount: usd, token_amount: sw.tokenHuman || 0,
-    price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null,
+    price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null, block: sw.block ?? null,
   });
   if (isBuy && sw.account) store.addBuyer(key, sw.account, sw.ts);
   recordTradeWrite();

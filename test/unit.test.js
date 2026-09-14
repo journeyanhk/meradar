@@ -9,6 +9,7 @@ import { normalizeSwap } from '../src/discover.js';
 import * as momentum from '../src/momentum.js';
 import { graduatedByCurve } from '../src/pool.js';
 import { goplusCheck } from '../src/goplus.js';
+import { classifyAccount, classifyTokenBuyers, taxPositive, BUYER_DEFAULTS } from '../src/buyer.js';
 
 // —— 1. Four.meme 事件签名的 topic0 必须与真实链上日志一致 ——
 // 这些 topic0 来自实际观测（见 review 报告）。类型排错会导致 selector 变化。
@@ -628,4 +629,98 @@ test('HookFeeCollected.payer=memecoin(非买家)：买家须取 tx.from', () => 
   const fee = _rh.v4.realSwapTx.events.find((e) => e.event === 'HookFeeCollected').args;
   assert.equal(fee.payer.toLowerCase(), init.currency1.toLowerCase(), 'payer 等于 memecoin，故不能当买家');
   assert.ok(/^0x[0-9a-fA-F]{40}$/.test(_rh.v4.realSwapTx.txFrom), 'tx.from 为真实买家');
+});
+
+// —— M2c 买家分级（跨链纯函数）——
+// 冻结真值表：sniper(税/时间窗)、bot(同块/5min)、farm、dust、fresh、flipper、natural。
+const LAUNCH = 1_000_000_000_000; // 任意基准 ms
+
+test('M2c sniper：狙击税 > 0 → sniper（全链）', () => {
+  const tags = classifyAccount({ buys: [{ ts: LAUNCH + 10 * 60_000, quoteUsd: 100, tokens: 1000, hasTax: true }] }, { launchMs: LAUNCH });
+  assert.ok(tags.includes('sniper'), '有狙击税即 sniper，与买入时间无关');
+});
+
+test('M2c sniper：首买距发射 ≤60s → sniper（跨链时间窗）', () => {
+  const tags = classifyAccount({ buys: [{ ts: LAUNCH + 30_000, quoteUsd: 100, tokens: 1000, hasTax: false }] }, { launchMs: LAUNCH });
+  assert.ok(tags.includes('sniper'), '30s 内买入 = sniper');
+  const late = classifyAccount({ buys: [{ ts: LAUNCH + 120_000, quoteUsd: 100, tokens: 1000, hasTax: false }] }, { launchMs: LAUNCH });
+  assert.ok(!late.includes('sniper'), '120s 后买入不是 sniper');
+});
+
+test('M2c sniper：无 launch_time 时时间窗不误判', () => {
+  const tags = classifyAccount({ buys: [{ ts: LAUNCH + 30_000, quoteUsd: 100, tokens: 1000, hasTax: false }] }, { launchMs: null });
+  assert.ok(!tags.includes('sniper'), 'launch_time 缺失 → 不按时间窗判 sniper');
+});
+
+test('M2c bot：同一区块 ≥3 笔买入 → bot', () => {
+  const buys = [
+    { ts: LAUNCH + 5 * 60_000, block: 100, quoteUsd: 50, tokens: 100 },
+    { ts: LAUNCH + 5 * 60_000, block: 100, quoteUsd: 50, tokens: 100 },
+    { ts: LAUNCH + 5 * 60_000, block: 100, quoteUsd: 50, tokens: 100 },
+  ];
+  assert.ok(classifyAccount({ buys }, { launchMs: LAUNCH }).includes('bot'), '同块 3 笔 = bot');
+  // 同块 2 笔(路由拆单)不算
+  assert.ok(!classifyAccount({ buys: buys.slice(0, 2) }, { launchMs: LAUNCH }).includes('bot'), '同块 2 笔不算 bot');
+});
+
+test('M2c bot：5 分钟内 ≥10 笔买入 → bot', () => {
+  const buys = [];
+  for (let i = 0; i < 10; i++) buys.push({ ts: LAUNCH + 10 * 60_000 + i * 20_000, block: 200 + i, quoteUsd: 20, tokens: 50 });
+  assert.ok(classifyAccount({ buys }, { launchMs: LAUNCH }).includes('bot'), '5min 内 10 笔 = bot');
+});
+
+test('M2c dust：累计买入 < $1 → dust', () => {
+  const tags = classifyAccount({ buys: [{ ts: LAUNCH + 20 * 60_000, block: 5, quoteUsd: 0.4, tokens: 1 }] }, { launchMs: LAUNCH });
+  assert.ok(tags.includes('dust'), '<$1 = dust');
+});
+
+test('M2c fresh：nonce ≤3 → fresh；nonce 未知不判', () => {
+  const buy = { buys: [{ ts: LAUNCH + 20 * 60_000, block: 5, quoteUsd: 100, tokens: 100 }] };
+  assert.ok(classifyAccount(buy, { launchMs: LAUNCH, nonce: 1 }).includes('fresh'), 'nonce 1 = fresh');
+  assert.ok(!classifyAccount(buy, { launchMs: LAUNCH, nonce: 50 }).includes('fresh'), 'nonce 50 不是 fresh');
+  assert.ok(!classifyAccount(buy, { launchMs: LAUNCH, nonce: null }).includes('fresh'), 'nonce 未知不判 fresh');
+});
+
+test('M2c flipper：首买后 10 分钟内卖出 ≥90% → flipper', () => {
+  const acct = {
+    buys: [{ ts: LAUNCH + 20 * 60_000, block: 5, quoteUsd: 100, tokens: 1000 }],
+    sells: [{ ts: LAUNCH + 20 * 60_000 + 5 * 60_000, tokens: 950 }],
+  };
+  assert.ok(classifyAccount(acct, { launchMs: LAUNCH }).includes('flipper'), '5min 内卖 95% = flipper');
+  // 11 分钟后才卖 → 不算
+  const slow = { buys: acct.buys, sells: [{ ts: LAUNCH + 20 * 60_000 + 11 * 60_000, tokens: 950 }] };
+  assert.ok(!classifyAccount(slow, { launchMs: LAUNCH }).includes('flipper'), '窗口外卖出不算 flipper');
+});
+
+test('M2c natural：无任何标签', () => {
+  const tags = classifyAccount({ buys: [{ ts: LAUNCH + 20 * 60_000, block: 5, quoteUsd: 100, tokens: 100 }] }, { launchMs: LAUNCH, nonce: 50 });
+  assert.deepEqual(tags, [], '普通买家无标签');
+});
+
+test('M2c classifyTokenBuyers：聚合 ratios + naturalBuyers30m', () => {
+  const now = LAUNCH + 40 * 60_000;
+  const trades = [
+    // 自然买家 A（30min 内首买）
+    { ts: now - 10 * 60_000, side: 'buy', account: '0xAAA', quote_amount: 100, token_amount: 100, block: 1 },
+    // sniper B（狙击税）
+    { ts: now - 5 * 60_000, side: 'buy', account: '0xBBB', quote_amount: 100, token_amount: 100, tax_raw: '5', block: 2 },
+    // farm C（由 farmSet 注入）
+    { ts: now - 5 * 60_000, side: 'buy', account: '0xCCC', quote_amount: 100, token_amount: 100, block: 3 },
+    // 只卖不买 D → 不计入买家
+    { ts: now - 5 * 60_000, side: 'sell', account: '0xDDD', token_amount: 50 },
+  ];
+  const res = classifyTokenBuyers(trades, { launchMs: null, farmSet: new Set(['0xccc']), now });
+  assert.equal(res.buyerCount, 3, '3 个买家(D 只卖不算)');
+  assert.equal(res.counts.sniper, 1);
+  assert.equal(res.counts.farm, 1);
+  assert.equal(res.naturalBuyers, 1, '仅 A 是自然买家');
+  assert.equal(res.naturalBuyers30m, 1, 'A 在 30min 内首买');
+  assert.ok(Math.abs(res.ratios.sniperRatio - 1 / 3) < 1e-9);
+});
+
+test('M2c taxPositive：字符串 raw 判正', () => {
+  assert.equal(taxPositive('0'), false);
+  assert.equal(taxPositive('1'), true);
+  assert.equal(taxPositive(null), false);
+  assert.equal(taxPositive('123456789012345678'), true);
 });

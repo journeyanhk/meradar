@@ -9,6 +9,10 @@
   "admission": {
     "minBuyersToActivate": 5
   },
+  "buyerGrading": {
+    "farmMinTokens24h": 15,
+    "nonceCheck": { "enabled": true, "topN": 30 }
+  },
   "score": {
     "honeypot": {
       "enabled": true,

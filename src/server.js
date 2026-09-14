@@ -9,8 +9,20 @@ import { healthSnapshot } from './health.js';
 import { templateHealth } from './template.js';
 import { rpcCapabilities } from './rpccap.js';
 import { child } from './logger.js';
+import { BUYER_TAGS } from './buyer.js';
 
 const log = child('server');
+
+// 软标记落库只存计数(buyerCount + 各标签数)；占比在此现算，避免同一份分布存两遍。
+function softFlagsFrom(json) {
+  let f = null;
+  try { f = json ? JSON.parse(json) : null; } catch { return null; }
+  if (!f) return null;
+  const n = f.buyerCount || 0;
+  const ratios = {};
+  for (const t of BUYER_TAGS) ratios[`${t}Ratio`] = n > 0 ? (f[t] || 0) / n : 0;
+  return { ...f, ...ratios };
+}
 
 function decorate(c) {
   let safety = null;
@@ -27,6 +39,8 @@ function decorate(c) {
     peakMcapUsd: peak, drawdownPct,
     netIn30m: c.net_in_30m || 0, netIn1h: c.net_in_1h || 0,
     maxBuy10m: c.max_buy_10m || 0, buyRatio30m: c.buy_ratio_30m || 0, newBuyers30m: c.new_buyers_30m || 0,
+    naturalBuyers30m: c.natural_buyers_30m || 0,
+    softFlags: softFlagsFrom(c.soft_flags),
     holders: c.holders, uniqueBuyers: c.unique_buyers, copycats: c.copycats,
     narrativeHit: c.narrative_hit ? c.narrative_hit.split(',').filter(Boolean) : [],
     discoveredAt: c.discovered_at, updatedAt: c.updated_at,

@@ -145,6 +145,29 @@ CREATE TABLE IF NOT EXISTS v4_pools (
   PRIMARY KEY (chain, pool_id)
 );
 CREATE INDEX IF NOT EXISTS idx_v4_token ON v4_pools(chain, token);
+
+-- 买家画像（M2c）：按地址跨币沉淀，为「自建聪明钱」预留列。
+-- tokens_bought_total = 该地址在库内买过的不同新币数(addBuyer 首次命中即 +1)；
+-- tokens_bought_24h = 轮询时按 buyers 表 24h 窗口重算写回；tags = 最近一次分级汇总(sniper/bot/farm/fresh/flipper)。
+-- early_hits/early_total/realized_pnl_usd 留给聪明钱模块，M2c 只建列不填。
+CREATE TABLE IF NOT EXISTS buyer_profiles (
+  chain             TEXT NOT NULL,
+  account           TEXT NOT NULL,
+  first_seen        INTEGER,
+  last_seen         INTEGER,
+  tokens_bought_24h INTEGER DEFAULT 0,
+  tokens_bought_total INTEGER DEFAULT 0,
+  tags              TEXT,
+  nonce_at_check    INTEGER,
+  nonce_checked_at  INTEGER,
+  early_hits        INTEGER DEFAULT 0,
+  early_total       INTEGER DEFAULT 0,
+  realized_pnl_usd  REAL DEFAULT 0,
+  PRIMARY KEY (chain, account)
+);
+-- farm 统计走 account 索引；buyers 表 first_ts 窗口过滤 + account 分组的跨币 COUNT(DISTINCT key)。
+CREATE INDEX IF NOT EXISTS idx_buyers_account ON buyers(account);
+CREATE INDEX IF NOT EXISTS idx_buyers_first_ts ON buyers(first_ts);
 `);
 
 // 幂等迁移：node:sqlite 错误信息少，用 PRAGMA table_info 判断列是否存在再 ADD COLUMN，
@@ -169,6 +192,8 @@ ensureColumns('candidates', [
   ['curve_progress_pct', 'curve_progress_pct REAL DEFAULT 0'],
   ['graduated_at', 'graduated_at INTEGER'],            // 毕业(建池)时刻 ms；毕业腿强提示要求 ≤60min。老数据为 NULL
   ['curve', 'curve TEXT'],                             // Pons(curve-per-token)：该币独立曲线合约地址；募集额=curve 余额
+  ['natural_buyers_30m', 'natural_buyers_30m INTEGER DEFAULT 0'], // M2c：30min 内首买且无任何标签的地址数(与 new_buyers_30m 并行，暂不入阈值)
+  ['soft_flags', 'soft_flags TEXT'],                   // M2c：买家分级软标记 JSON(sniperRatio/botRatio/farmRatio/... )，只展示不门控
 ]);
 // trades 已有 price(成交时单价 USD)=price_at_trade，无需重复列；只补 mcap_at_trade：
 // 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
@@ -178,6 +203,8 @@ ensureColumns('trades', [
   // 供 M2c 买家质量分级(tax>0 视为狙击非自然买家)与 M4 纸面引擎扣税，现在先落库避免历史数据缺口。
   ['fee_raw', 'fee_raw TEXT'],
   ['tax_raw', 'tax_raw TEXT'],
+  // M2c：成交所在区块。买家分级「同块 ≥3 笔=bot」需要；仅实时路径写入(回填只喂 momentum)，历史行为 NULL。
+  ['block', 'block INTEGER'],
 ]);
 
 const stmt = {
@@ -241,7 +268,7 @@ const stmt = {
     FROM candidates
   `),
   missedKills: db.prepare(`SELECT COUNT(*) AS missed FROM candidates WHERE status='rejected' AND peak_mcap_usd >= 1000000`),
-  insertTrade: db.prepare(`INSERT INTO trades (key, ts, side, account, quote_amount, token_amount, price, mcap_at_trade, fee_raw, tax_raw) VALUES (@key, @ts, @side, @account, @quote_amount, @token_amount, @price, @mcap_at_trade, @fee_raw, @tax_raw)`),
+  insertTrade: db.prepare(`INSERT INTO trades (key, ts, side, account, quote_amount, token_amount, price, mcap_at_trade, fee_raw, tax_raw, block) VALUES (@key, @ts, @side, @account, @quote_amount, @token_amount, @price, @mcap_at_trade, @fee_raw, @tax_raw, @block)`),
   lastTradeTs: db.prepare(`SELECT MAX(ts) AS ts FROM trades WHERE key=?`),
   deleteOldTrades: db.prepare(`DELETE FROM trades WHERE ts < ?`),
   countTrades: db.prepare(`SELECT COUNT(*) AS n FROM trades`),
@@ -281,7 +308,39 @@ const stmt = {
   v4PoolById: db.prepare(`SELECT * FROM v4_pools WHERE chain=? AND pool_id=?`),
   allV4Pools: db.prepare(`SELECT * FROM v4_pools`),
   v4PoolsByChain: db.prepare(`SELECT * FROM v4_pools WHERE chain=?`),
+  // M2c 买家分级
+  tradesForKey: db.prepare(`SELECT ts, side, account, quote_amount, token_amount, tax_raw, block FROM trades WHERE key=? AND account IS NOT NULL ORDER BY ts ASC`),
+  // farm/tokens_24h：某链 24h 窗口内每个地址买过多少个不同新币。一次分组扫描，track 侧缓存 60s，
+  // 既得 farm 集(≥N)又得每地址 tokens_bought_24h。key LIKE 'chain:%' 过滤链；first_ts>=since 限窗。
+  buyerTokenCounts24h: db.prepare(`SELECT account, COUNT(DISTINCT key) AS n FROM buyers WHERE key LIKE @prefix AND first_ts >= @since GROUP BY account`),
+  setBuyerFlags: db.prepare(`UPDATE candidates SET natural_buyers_30m=@natural_buyers_30m, soft_flags=@soft_flags, updated_at=@updated_at WHERE key=@key`),
+  // buyer_profiles：addBuyer 首次命中某(链,地址,新币) → 累计 total + 更新 first/last_seen。
+  bumpBuyerProfile: db.prepare(`
+    INSERT INTO buyer_profiles (chain, account, first_seen, last_seen, tokens_bought_total)
+    VALUES (@chain, @account, @ts, @ts, 1)
+    ON CONFLICT(chain, account) DO UPDATE SET
+      first_seen=MIN(buyer_profiles.first_seen, @ts),
+      last_seen=MAX(buyer_profiles.last_seen, @ts),
+      tokens_bought_total=buyer_profiles.tokens_bought_total + 1
+  `),
+  setBuyerTags: db.prepare(`
+    INSERT INTO buyer_profiles (chain, account, first_seen, last_seen, tokens_bought_24h, tags)
+    VALUES (@chain, @account, @ts, @ts, @tokens24h, @tags)
+    ON CONFLICT(chain, account) DO UPDATE SET
+      last_seen=MAX(buyer_profiles.last_seen, @ts),
+      tokens_bought_24h=@tokens24h,
+      tags=@tags
+  `),
+  setBuyerNonce: db.prepare(`
+    INSERT INTO buyer_profiles (chain, account, first_seen, last_seen, nonce_at_check, nonce_checked_at)
+    VALUES (@chain, @account, @ts, @ts, @nonce, @ts)
+    ON CONFLICT(chain, account) DO UPDATE SET
+      nonce_at_check=@nonce, nonce_checked_at=@ts
+  `),
 };
+
+// buyerProfilesForAccounts 的 IN(...) prepared statement 按占位符个数缓存(节点 sqlite 需固定 SQL)。
+const buyerProfilesInStmt = new Map();
 
 export const store = {
   raw: db,
@@ -321,7 +380,7 @@ export const store = {
   activeCandidates(limit = 400) { return stmt.activeCandidates.all(limit); },
   feed(limit = 200) { return stmt.listFeed.all(limit); },
   stats(since24h) { return { ...stmt.stats.get(since24h), missed: stmt.missedKills.get().missed }; },
-  addTrade(t) { stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, mcap_at_trade: null, fee_raw: null, tax_raw: null, ...t }); },
+  addTrade(t) { stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, mcap_at_trade: null, fee_raw: null, tax_raw: null, block: null, ...t }); },
   lastTradeTs(key) { return stmt.lastTradeTs.get(key)?.ts ?? null; },
   purgeTrades(beforeMs) { return stmt.deleteOldTrades.run(beforeMs).changes; },
   tradeCount() { return stmt.countTrades.get().n; },
@@ -335,7 +394,50 @@ export const store = {
       newBuyers30m: newBuyers,
     };
   },
-  addBuyer(key, account, first_ts) { stmt.insertBuyer.run({ key, account: account.toLowerCase(), first_ts }); },
+  addBuyer(key, account, first_ts) {
+    const acc = account.toLowerCase();
+    const changes = stmt.insertBuyer.run({ key, account: acc, first_ts }).changes;
+    // 首次为该地址记录「买过这个新币」→ buyer_profiles 累计 tokens_bought_total(distinct 币数)。
+    // first_ts=0 的存量买家(promote 快照)也计入，但用当下时间戳更新 last_seen/first_seen 更稳妥。
+    if (changes > 0) {
+      const chain = key.split(':')[0];
+      stmt.bumpBuyerProfile.run({ chain, account: acc, ts: first_ts || Date.now() });
+    }
+    return changes;
+  },
+  // M2c 买家分级：读该币全部有主成交、farm 地址集、写回自然买家/软标记、沉淀画像。
+  tradesForKey(key) { return stmt.tradesForKey.all(key); },
+  buyerTokenCounts24h(chain, sinceMs) {
+    const m = new Map();
+    for (const r of stmt.buyerTokenCounts24h.all({ prefix: `${chain}:%`, since: sinceMs })) m.set(r.account, r.n);
+    return m;
+  },
+  setBuyerFlags(key, naturalBuyers30m, softFlags) {
+    stmt.setBuyerFlags.run({ key, natural_buyers_30m: naturalBuyers30m | 0, soft_flags: softFlags ? JSON.stringify(softFlags) : null, updated_at: Date.now() });
+  },
+  setBuyerTags(chain, account, tags, tokens24h, ts = Date.now()) {
+    stmt.setBuyerTags.run({ chain, account: account.toLowerCase(), tags: tags && tags.length ? tags.join(',') : null, tokens24h: tokens24h | 0, ts });
+  },
+  setBuyerNonce(chain, account, nonce, ts = Date.now()) {
+    stmt.setBuyerNonce.run({ chain, account: account.toLowerCase(), nonce: nonce | 0, ts });
+  },
+  // 批量取一组地址的画像(tags/nonce)，一次查询替代逐地址点查(避免每轮每候选 N+1)。分片规避 SQL 变量上限；
+  // 按占位符个数缓存 prepared statement，避免每轮 re-prepare。
+  buyerProfilesForAccounts(chain, accounts) {
+    const m = new Map();
+    if (!accounts?.length) return m;
+    const CH = 400;
+    for (let i = 0; i < accounts.length; i += CH) {
+      const chunk = accounts.slice(i, i + CH).map((a) => a.toLowerCase());
+      let ps = buyerProfilesInStmt.get(chunk.length);
+      if (!ps) {
+        ps = db.prepare(`SELECT account, tags, nonce_at_check, nonce_checked_at FROM buyer_profiles WHERE chain=? AND account IN (${chunk.map(() => '?').join(',')})`);
+        buyerProfilesInStmt.set(chunk.length, ps);
+      }
+      for (const r of ps.all(chain, ...chunk)) m.set(r.account, r);
+    }
+    return m;
+  },
   buyers(key) { return stmt.buyersForKey.all(key).map((r) => r.account); },
   swapPools() { return stmt.swapPools.all(); },
   // 模板哈希自学习：累计频次并返回最新 count；查已达阈值的哈希（供 template.js 白名单合并）。

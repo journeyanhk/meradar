@@ -5,13 +5,51 @@ import { narrativeHit, copycatCount } from './narrative.js';
 import { maybeAlert, evaluateTier } from './alert.js';
 import { store } from './db.js';
 import { config, chainConfig } from './config.js';
+import { httpClient } from './chain.js';
 import { bus, Events } from './bus.js';
 import * as momentum from './momentum.js';
+import { classifyTokenBuyers } from './buyer.js';
 import { child } from './logger.js';
 import { formatUnits } from 'viem';
 
 const log = child('track');
 const RANK = { T0: 0, T1: 1, T2: 2, T3: 3 };
+const DAY = 24 * 3600 * 1000;
+
+// farm/tokens_24h 统计跨币扫描，60s 缓存一份/链，避免每候选每轮全表扫。
+const farmCache = new Map(); // chain -> { at, counts:Map<account,n> }
+function buyerCounts24h(chain) {
+  const c = farmCache.get(chain);
+  if (c && Date.now() - c.at < 60_000) return c.counts;
+  const counts = store.buyerTokenCounts24h(chain, Date.now() - DAY);
+  farmCache.set(chain, { at: Date.now(), counts });
+  return counts;
+}
+
+// nonce(fresh 钱包)：只对金额前 topN、且从未查过(nonce_checked_at=null)的买家查一次，落 buyer_profiles。
+// 成本上限：每候选每轮 ≤topN 次 eth_getTransactionCount(viem batch 合并)，查过即不再查。
+// profiles = 本轮已批量取好的画像 Map，避免逐地址点查；返回本轮新查到 nonce 的地址集。
+async function ensureNonces(chain, buyUsdByAccount, profiles) {
+  const cfg = config.buyerGrading?.nonceCheck || {};
+  if (!cfg.enabled) return new Set();
+  const topN = cfg.topN || 30;
+  const top = [...buyUsdByAccount.entries()].sort((a, b) => b[1] - a[1]).slice(0, topN);
+  const todo = top.filter(([acc]) => !(profiles.get(acc)?.nonce_checked_at));
+  if (!todo.length) return new Set();
+  const client = httpClient(chain);
+  const checked = new Set();
+  await Promise.all(todo.map(async ([acc]) => {
+    try {
+      const n = await client.getTransactionCount({ address: acc });
+      store.setBuyerNonce(chain, acc, Number(n));
+      checked.add(acc);
+    } catch { /* 查不到 nonce → 下轮再试 */ }
+  }));
+  return checked;
+}
+
+// 标签集合规范化为可比较字符串（顺序无关），用于变更检测，避免每轮无谓写库。
+function tagsKey(tags) { return [...tags].sort().join(','); }
 
 function supplyHuman(cand) {
   if (!cand.total_supply) return 0;
@@ -93,6 +131,50 @@ export async function pollCandidate(chain, cand) {
 
   // 净流入/最大单笔/买卖比/新买家 —— 全部一句 SQL 取自 trades 表
   const flow = store.tradeFlow(cand.key);
+
+  // —— M2c 买家分级（跨链纯函数；只展示不门控）——
+  // 取该币全部有主成交 → 分级(sniper/bot/farm/dust/fresh/flipper) → 自然买家/软标记并行落库(不改阈值输入)。
+  // 软标记只存计数(buyerCount + 各标签数)，占比在 API 层现算，避免同一份分布存两遍。
+  let softFlags = null, naturalBuyers30m = flow.newBuyers30m;
+  try {
+    const trades = store.tradesForKey(cand.key);
+    if (trades.length) {
+      const counts24h = buyerCounts24h(chain);
+      const farmMin = config.buyerGrading?.farmMinTokens24h ?? 15;
+      const farmSet = new Set([...counts24h].filter(([, n]) => n >= farmMin).map(([a]) => a));
+      // 每地址在本币的累计买入额(USD) → dust 判定 + nonce 取样排序
+      const buyUsdByAccount = new Map();
+      for (const t of trades) {
+        if (t.side !== 'buy' || !t.account) continue;
+        const a = t.account.toLowerCase();
+        buyUsdByAccount.set(a, (buyUsdByAccount.get(a) || 0) + (t.quote_amount || 0));
+      }
+      // 一次批量取本币全部买家画像(tags/nonce)，替代逐地址点查(N+1)。
+      const accounts = [...buyUsdByAccount.keys()];
+      let profiles = store.buyerProfilesForAccounts(chain, accounts);
+      if (cand.status === 'active') {
+        const checked = await ensureNonces(chain, buyUsdByAccount, profiles)
+          .catch((e) => { log.debug({ err: e.message }, 'ensureNonces'); return new Set(); });
+        if (checked.size) profiles = store.buyerProfilesForAccounts(chain, accounts); // 新查到 nonce → 重取供本轮 fresh 判定
+      }
+      const nonceByAccount = new Map();
+      for (const [acc, p] of profiles) if (p.nonce_checked_at) nonceByAccount.set(acc, p.nonce_at_check);
+      const cls = classifyTokenBuyers(trades, { launchMs: cand.launch_time ?? null, farmSet, nonceByAccount });
+      naturalBuyers30m = cls.naturalBuyers30m;
+      softFlags = { buyerCount: cls.buyerCount, naturalBuyers: cls.naturalBuyers, ...cls.counts };
+      // 画像沉淀：给标签有变化的买家写标签 + tokens_bought_24h(供 farm/聪明钱复用)；标签未变则跳过写库。
+      for (const [acc, tags] of cls.tagsByAccount) {
+        const prevTags = profiles.get(acc)?.tags || '';
+        if (tagsKey(tags) === tagsKey(prevTags ? prevTags.split(',') : [])) continue;
+        store.setBuyerTags(chain, acc, tags, counts24h.get(acc) || 0);
+      }
+    }
+  } catch (e) { log.debug({ err: e.message, key: cand.key }, '买家分级失败(忽略)'); }
+  // 软标记/自然买家未变则不写库(每候选每轮都会进这里，避免无谓 UPDATE + updated_at 抖动)。
+  const softFlagsJson = softFlags ? JSON.stringify(softFlags) : null;
+  if ((prev?.natural_buyers_30m ?? 0) !== (naturalBuyers30m | 0) || (prev?.soft_flags ?? null) !== softFlagsJson) {
+    store.setBuyerFlags(cand.key, naturalBuyers30m, softFlags);
+  }
 
   // 三条独立新鲜度门的输入（见 alert.evaluateTier）：
   //  · 成交新鲜度 = 最近一次成交距今（trades 表 → 内存动量）

@@ -158,6 +158,7 @@ function routeFourMeme(chain, lp, l, handlers) {
       launchpad: lp.id, label: lp.label,
       price: a.price ?? null, amount: a.amount ?? null, cost: a.cost ?? null,
       offers: a.offers ?? null, funds: a.funds ?? null,
+      block: Number(l.blockNumber || 0), // M2c：同块多买=bot 判定
       isBuy: name === 'TokenPurchase', ts: Date.now(),
     });
   }
@@ -257,6 +258,7 @@ function routePonsCurve(chain, lp, l, handlers) {
     chain, address: token, account, launchpad: lp.id, label: lp.label,
     price, amount: tokenRaw, cost: quoteRaw, offers: null, funds: null,
     fee: a.fee ?? null, tax: a.tax ?? null, // 曲线自带手续费/税(报价币最小单位)，落库供 M2c/M4
+    block: Number(l.blockNumber || 0), // M2c：同块多买=bot 判定
     isBuy, ts: Date.now(),
   });
 }
@@ -322,7 +324,7 @@ export function normalizeSwap(l, p, chain) {
   // ts 使用 Date.now()：本函数只服务实时订阅路径（swap 到达即处理），偏差可忽略。
   // ⚠️ 若将来新增「历史 Swap 回填」，勿复用此处的 Date.now()——需按块高估算
   //    ts = now − (latest − blockNumber) × 区块间隔，与 backfill 中曲线成交的口径一致。
-  return { chain, address: p.token, account, side, quoteHuman, quoteSym: p.quoteSym, tokenHuman, ts: Date.now() };
+  return { chain, address: p.token, account, side, quoteHuman, quoteSym: p.quoteSym, tokenHuman, block: Number(l.blockNumber || 0), ts: Date.now() };
 }
 
 /**
@@ -396,5 +398,5 @@ async function normalizeSwapV4(l, p, chain) {
   }
   const quoteHuman = Number(formatUnits(c.quoteRaw, p.quoteDecimals || 18));
   const tokenHuman = Number(formatUnits(c.tokenRaw, p.tokenDecimals || 18));
-  return { chain, address: p.token, account, side: c.side, quoteHuman, quoteSym: p.quoteSym, tokenHuman, ts: Date.now() };
+  return { chain, address: p.token, account, side: c.side, quoteHuman, quoteSym: p.quoteSym, tokenHuman, block: Number(l.blockNumber || 0), ts: Date.now() };
 }
