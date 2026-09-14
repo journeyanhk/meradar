@@ -1,4 +1,4 @@
-import { chainConfig, config } from './config.js';
+import { chainConfig, config, allowUnverifiedStrongFor } from './config.js';
 import { store } from './db.js';
 import { goplusCheck } from './goplus.js';
 import { roundTripCheck } from './roundtrip.js';
@@ -43,6 +43,11 @@ export async function evaluateTradeSafety(chain, cand, { wantFresh = false, grad
 
   let roundTrip = null;
   let templateMatch = false;
+  // Pons 等「每币独立 curve 合约」发射台：代币由工厂事件(TokenLaunched)登记，工厂负责部署、创建者无法注入代码，
+  // 故「已登记 curve + 该发射台为 curve-per-token」即等价平台部署。Pons 代币把名称/符号编进 immutable →
+  // 每个哈希都不同，字节码哈希白名单(Four.meme 的 EIP-1167 代理)对 Pons 恒 false，必须用工厂登记作判据。
+  const lp = cfg.launchpads?.find((l) => l.id === cand.launchpad);
+  const platformDeployed = !!cand.curve && lp?.type === 'curve-per-token';
   if (graduated) {
     if (config.score.honeypot?.enabled) {
       roundTrip = await roundTripCheck(chain, cand, { fresh: wantFresh }).catch((e) => {
@@ -50,8 +55,8 @@ export async function evaluateTradeSafety(chain, cand, { wantFresh = false, grad
         return { status: 'error' };
       });
     }
-  } else if (!graduating) {
-    // 毕业中窗口不查模板：directly WAIT（见 classifyTradeSafety）
+  } else if (!graduating && !platformDeployed) {
+    // 毕业中窗口 / 平台工厂部署 都不查字节码模板：前者 directly WAIT，后者直接 PASS(factory)。
     templateMatch = await matchesTemplate(chain, cand.address).catch((e) => {
       log.debug({ err: e.message, token: cand.symbol }, 'matchesTemplate 异常');
       return false;
@@ -63,7 +68,10 @@ export async function evaluateTradeSafety(chain, cand, { wantFresh = false, grad
     goplus = await goplusCheck(cfg.goplusId, cand.address).catch(() => null);
   }
 
-  const cls = classifyTradeSafety({ graduated, graduating, templateMatch, roundTrip, goplus, rejectSellTaxBps: REJECT_SELL_TAX_BPS });
+  const cls = classifyTradeSafety({
+    graduated, graduating, platformDeployed, templateMatch, roundTrip, goplus,
+    allowUnverifiedStrong: allowUnverifiedStrongFor(chain), rejectSellTaxBps: REJECT_SELL_TAX_BPS,
+  });
   return {
     ...cls,
     graduated,
@@ -85,7 +93,7 @@ export async function evaluateTradeSafety(chain, cand, { wantFresh = false, grad
  *   goplus        { isHoneypot, cannotSellAll, sellTaxBps, naFields } | null
  * 返回 { state, source, capTier, sellTaxBps?, naFields?, softFlags?, reason?, note? }
  */
-export function classifyTradeSafety({ graduated, graduating = false, templateMatch, roundTrip, goplus, rejectSellTaxBps = REJECT_SELL_TAX_BPS }) {
+export function classifyTradeSafety({ graduated, graduating = false, platformDeployed = false, templateMatch, roundTrip, goplus, allowUnverifiedStrong = false, rejectSellTaxBps = REJECT_SELL_TAX_BPS }) {
   const na = new Set(goplus?.naFields || []);
   const gpHoneypot = !!goplus && goplus.isHoneypot === true && !na.has('isHoneypot');
   const gpCannotSell = !!goplus && goplus.cannotSellAll === true && !na.has('cannotSellAll');
@@ -111,6 +119,10 @@ export function classifyTradeSafety({ graduated, graduating = false, templateMat
   if (!graduated) {
     // 已达毕业条件但池子尚未接上：币可能已在 AMM 交易，模板 PASS 会误放行强提示 → WAIT，等池接上走往返。
     if (graduating) return { state: 'WAIT', source: 'graduating', capTier: 'T1', note: '毕业中，池未接上' };
+    // 平台工厂部署(Pons 等 curve-per-token)：工厂部署代码不可注入 → 视同平台模板，PASS。
+    if (platformDeployed) {
+      return { state: 'PASS', source: 'factory', capTier: null, naFields: ['sellTax', 'cannotSellAll'], note: '曲线期·平台工厂部署' };
+    }
     if (templateMatch) {
       return { state: 'PASS', source: 'template', capTier: null, naFields: ['sellTax', 'cannotSellAll'], note: '曲线期·平台模板' };
     }
@@ -143,6 +155,13 @@ export function classifyTradeSafety({ graduated, graduating = false, templateMat
     gpCannotSellKnown && goplus.cannotSellAll === false &&
     gpTaxKnown && goplus.sellTaxBps < rejectSellTaxBps;
   if (gpClean) return { state: 'PASS', source: 'goplus', capTier: null, sellTaxBps: goplus.sellTaxBps, note: 'GoPlus' };
+
+  // 毕业后无往返路径(v4 未实现→unsupported) 且该链开启收紧版豁免：放行强提示但不封顶，标未核验。
+  // 依据：Pons 池 LP 永久锁定、hook 透明收费、fee=0，毕业后貔貅风险低。到期(config until)后自动回落 WAIT/T1。
+  // 仅 unsupported(无路径)豁免，不豁免 error(读失败应退避复查)。
+  if (graduated && allowUnverifiedStrong && roundTrip && roundTrip.status === 'unsupported') {
+    return { state: 'WAIT', source: 'unverified', capTier: null, softFlags: ['未核验路径'], note: '⚠ 未核验路径：v4 往返尚未实现' };
+  }
 
   return { state: 'WAIT', source: 'none', capTier: 'T1', note: '无验证路径' };
 }

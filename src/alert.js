@@ -1,4 +1,4 @@
-import { chainConfig, config } from './config.js';
+import { chainConfig, config, tiersFor } from './config.js';
 import { store } from './db.js';
 import { bus, Events } from './bus.js';
 import { sendTelegram } from './notify/telegram.js';
@@ -35,7 +35,7 @@ function usd(n) {
 // 新鲜度字段（m.lastTradeTs / m.graduatedAt / m.roundTripCheckedAt / m.now）缺省时视为不设限，
 // 使纯动量单测聚焦分级本身；track 每轮显式传入真实时间戳启用门槛。
 export function evaluateTier(cand, m) {
-  const T = config.tiers;
+  const T = tiersFor(cand?.chain);
   const hasNarrative = !!(m.narrativeHits && m.narrativeHits.length > 0);
   const k = hasNarrative ? (T.narrativeMultiplier || 1) : 1; // <1 表示更容易触发
 
@@ -129,10 +129,12 @@ function safetyLine(m) {
   if (!ts) return null;
   if (ts.state === 'PASS') {
     if (ts.source === 'template') return '卖税 曲线期·平台模板 ✓';
+    if (ts.source === 'factory') return '卖税 曲线期·平台工厂部署 ✓';
     if (ts.sellTaxBps != null) return `卖税 ✓ ${(ts.sellTaxBps / 100).toFixed(1)}%`;
     return '卖税 ✓ 已核验';
   }
   if (ts.state === 'WAIT') {
+    if (ts.source === 'unverified') return '⚠ 未核验路径：v4 往返尚未实现';
     if (ts.softFlags?.includes('数据冲突')) return '卖税 数据冲突·待复核';
     return '卖税 未核验（退避复查）';
   }
@@ -155,6 +157,7 @@ function buildReason(tier, m) {
 
 function renderBody(chain, cand, m, reason, links, tier) {
   const l = [];
+  if (m.tradeSafety?.source === 'unverified') l.push('⚠ <b>未核验路径：v4 往返尚未实现</b>');
   l.push(`🛰️ <b>[${tier}] ${escape(cand.symbol)}</b>  ${escape(cand.name || '')}`);
   l.push(`链: ${chain} · 发射台: ${cand.launchpad}`);
   l.push(reason);
@@ -166,6 +169,7 @@ function renderBody(chain, cand, m, reason, links, tier) {
 
 function renderMarkdown(chain, cand, m, reason, links) {
   const l = [];
+  if (m.tradeSafety?.source === 'unverified') l.push('> ⚠ 未核验路径：v4 往返尚未实现');
   l.push(`**${escape(cand.name || cand.symbol)}** (${escape(cand.symbol)})`);
   l.push(`- 链 / 发射台: ${chain} / ${cand.launchpad}`);
   l.push(`- ${reason}`);

@@ -422,6 +422,92 @@ test('真值表⑪：毕业中(池未接上) -> WAIT，即便字节码像模板�
   assert.equal(r.capTier, 'T1');
 });
 
+// —— M3-1b 部署前修复：Pons 工厂判据 + v4 未核验豁免 ——
+test('工厂判据：曲线期 platformDeployed（工厂逐币部署）-> PASS(factory)，不看字节码哈希', () => {
+  const r = classifyTradeSafety({
+    graduated: false, platformDeployed: true, templateMatch: false, roundTrip: null, goplus: null,
+  });
+  assert.equal(r.state, 'PASS');
+  assert.equal(r.source, 'factory');
+  assert.equal(r.capTier, null);
+  assert.ok(r.naFields?.includes('sellTax'));
+});
+
+test('工厂判据：毕业中优先于 platformDeployed -> WAIT(graduating)，不因工厂部署放行', () => {
+  const r = classifyTradeSafety({
+    graduated: false, graduating: true, platformDeployed: true, templateMatch: false, roundTrip: null, goplus: null,
+  });
+  assert.equal(r.state, 'WAIT');
+  assert.equal(r.source, 'graduating');
+  assert.equal(r.capTier, 'T1');
+});
+
+test('v4 未核验豁免：毕业后 v4 unsupported + 允许未核验强信号 -> WAIT 但不封顶(source=unverified)', () => {
+  const r = classifyTradeSafety({
+    graduated: true, roundTrip: { status: 'unsupported' }, goplus: null, allowUnverifiedStrong: true,
+  });
+  assert.equal(r.state, 'WAIT');
+  assert.equal(r.source, 'unverified');
+  assert.equal(r.capTier, null);
+  assert.ok(r.softFlags?.includes('未核验路径'));
+});
+
+test('v4 未核验豁免：同场景但未开启豁免 -> WAIT 封顶 T1', () => {
+  const r = classifyTradeSafety({
+    graduated: true, roundTrip: { status: 'unsupported' }, goplus: null, allowUnverifiedStrong: false,
+  });
+  assert.equal(r.state, 'WAIT');
+  assert.equal(r.capTier, 'T1');
+  assert.notEqual(r.source, 'unverified');
+});
+
+test('v4 未核验豁免：仅限 unsupported，error 状态不豁免（仍封顶 T1）', () => {
+  const r = classifyTradeSafety({
+    graduated: true, roundTrip: { status: 'error' }, goplus: null, allowUnverifiedStrong: true,
+  });
+  assert.equal(r.state, 'WAIT');
+  assert.equal(r.capTier, 'T1');
+  assert.notEqual(r.source, 'unverified');
+});
+
+// —— M3-1b 部署前修复：tiersFor / allowUnverifiedStrongFor / narrativeHit 逐链 ——
+import { tiersFor, allowUnverifiedStrongFor } from '../src/config.js';
+import { narrativeHit } from '../src/narrative.js';
+
+test('tiersFor：未知链返回全局 tiers，不抛错', () => {
+  const g = tiersFor(undefined);
+  assert.ok(g && typeof g === 'object');
+  assert.deepEqual(tiersFor('__no_such_chain__'), g);
+});
+
+test('tiersFor：robinhood 覆盖 T1/T2 且浅合并保留全局其它字段', () => {
+  const g = tiersFor(undefined);
+  const rh = tiersFor('robinhood');
+  assert.equal(rh.T1.marketCapUsd, 30000);
+  assert.equal(rh.T2.marketCapUsd, 150000);
+  assert.equal(rh.T2.minLiquidityUsd, 20000);
+  // 全局 T1 其它键仍在（浅合并，未被整体替换）
+  for (const k of Object.keys(g.T1 || {})) {
+    if (k !== 'marketCapUsd') assert.equal(rh.T1[k], g.T1[k]);
+  }
+});
+
+test('allowUnverifiedStrongFor：robinhood 在有效期内为 true，未知链为 false', () => {
+  assert.equal(allowUnverifiedStrongFor('__no_such_chain__'), false);
+  assert.equal(allowUnverifiedStrongFor(undefined), false);
+  // robinhood 配置 until=2026-09-30，当前(测试运行)应在期内
+  const rh = allowUnverifiedStrongFor('robinhood');
+  assert.equal(typeof rh, 'boolean');
+});
+
+test('narrativeHit：robinhood 叠加逐链关键词（TSLA 命中），未知链仅全局', () => {
+  const hits = narrativeHit('robinhood', 'TSLA moon', 'TSLA');
+  assert.ok(hits.some((h) => h.toLowerCase() === 'tsla'));
+  // 未知链不应命中 robinhood 专属词
+  const none = narrativeHit('__no_such_chain__', 'TSLA moon', 'TSLA');
+  assert.ok(!none.some((h) => h.toLowerCase() === 'tsla'));
+});
+
 // —— 往返模拟纯函数：taxBps 税率换算 ——
 import { taxBps, buildPaths } from '../src/roundtrip.js';
 import { getAddress } from 'viem';

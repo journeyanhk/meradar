@@ -53,6 +53,7 @@ export async function roundTripCheck(chain, cand, { amountIn = DEFAULT_AMOUNT_IN
   const cfg = chainConfig(chain);
 
   if (!stateOverrideSupported(chain)) return wrap({ status: 'unsupported', note: 'RPC 不支持 stateOverride' });
+  if ((cand.pool_type || '').toLowerCase() === 'v4') return wrap({ status: 'unsupported', note: 'v4 往返未实现(unlock 回调待做)' });
   if ((cand.pool_type || '').toLowerCase() === 'v3') return wrap(await roundTripV3(chain, cand, cfg, amountIn));
   const router = cfg.router;
   const paths = buildPaths(cfg, cand.quote_symbol, cand.address);

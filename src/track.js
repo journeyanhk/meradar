@@ -132,7 +132,7 @@ export async function pollCandidate(chain, cand) {
   const prevBuyers = prev?.unique_buyers || 0;
   const holderGrowthPct = prevBuyers > 0 ? ((uniqueBuyers - prevBuyers) / prevBuyers) * 100 : 0;
 
-  const hits = narrativeHit(cand.name, cand.symbol);
+  const hits = narrativeHit(chain, cand.name, cand.symbol);
   const copycats = cand.copy_of ? 0 : copycatCount(chain, cand.symbol); // 仅原版累计仿盘热度
 
   // —— M3-1 priceOf：统一价格来源 + 新鲜度 + 不归零护栏 ——

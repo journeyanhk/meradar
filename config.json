@@ -145,7 +145,12 @@
       "nativeUsdPool": { "chain": "bsc", "pool": "0x531FEbfeb9a61D948c384ACFBe6dCc51057AEa7e", "usdt": "0x55d398326f99059fF775485246999027B3197955", "usdtDecimals": 18, "baseDecimals": 18 },
       "backfillHours": 1,
       "wbnbUsdPriceFallback": 2500,
-      "allowUnverifiedStrong": false,
+      "allowUnverifiedStrong": { "until": "2026-09-30" },
+      "tiers": {
+        "T1": { "marketCapUsd": 30000 },
+        "T2": { "marketCapUsd": 150000, "minLiquidityUsd": 20000 }
+      },
+      "narrativeKeywords": ["TSLA", "NVDA", "SPY", "HIMS", "MU", "AI", "Inu", "Pons", "Robinhood", "stock", "ETF"],
       "quoteTokens": {
         "ETH": { "address": "0x0000000000000000000000000000000000000000", "decimals": 18, "native": true },
         "USDG": { "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "decimals": 6, "stable": true }
