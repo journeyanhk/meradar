@@ -143,7 +143,8 @@
       "wbnbUsdPriceFallback": 2500,
       "allowUnverifiedStrong": false,
       "quoteTokens": {
-        "ETH": { "address": "0x0000000000000000000000000000000000000000", "decimals": 18, "native": true }
+        "ETH": { "address": "0x0000000000000000000000000000000000000000", "decimals": 18, "native": true },
+        "USDG": { "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "decimals": 6, "stable": true }
       },
       "launchpads": [
         {

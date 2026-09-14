@@ -1,78 +1,175 @@
 {
-  "_note": "M0 冻结的 Robinhood/Pons 链上事件样本，供单测断言解码正确性。勿手改，重生成用 scripts。",
-  "chainId": 4663,
+ "_note": "M0 冻结的 Robinhood/Pons 链上事件样本，供单测断言解码正确性。勿手改，重生成用 scripts。",
+ "chainId": 4663,
+ "graduationTx": {
+  "hash": "0x76cf7df788b8f979aab89274ca33bea3f2992b87d081f09e85e39e22e9739cb9",
+  "events": [
+   {
+    "event": "PoolRegistered",
+    "emitter": "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044",
+    "block": 62426801,
+    "tx": "0x76cf7df788b8f979aab89274ca33bea3f2992b87d081f09e85e39e22e9739cb9",
+    "args": {
+     "poolId": "0x20a88a40b7904a101f12d2d03b0438a95f8c4d2f87c0af40bedcf7674bae6cc7",
+     "memecoin": "0x35B5611B773fEbBeA5CfAC119bCAdA8130d02562",
+     "quoteToken": "0x0000000000000000000000000000000000000000",
+     "creator": "0xeba02D94152b843B01E92C4364463422485df793"
+    }
+   },
+   {
+    "event": "PoolGraduated",
+    "emitter": "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+    "block": 62426801,
+    "tx": "0x76cf7df788b8f979aab89274ca33bea3f2992b87d081f09e85e39e22e9739cb9",
+    "args": {
+     "token": "0x35B5611B773fEbBeA5CfAC119bCAdA8130d02562",
+     "a": "2669708",
+     "b": "204081632653061225780924614",
+     "c": "4200000000000000093"
+    }
+   }
+  ]
+ },
+ "launchTx": {
+  "hash": "0x62a36b03d5dcfdc2c1dc69bab050749904c7cfd1cc1ea208a486ddba3fb5f6d4",
+  "events": [
+   {
+    "event": "TokenLaunched",
+    "emitter": "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+    "block": 62438688,
+    "tx": "0x62a36b03d5dcfdc2c1dc69bab050749904c7cfd1cc1ea208a486ddba3fb5f6d4",
+    "args": {
+     "token": "0x4d7a45D516BF797d0721135F1FAe3D1D0b0a4f04",
+     "curve": "0xc6e30E3af487ff0f9cf987bDD6700aDAdB619fA2",
+     "deployer": "0xA3d0308a2BC2c27829AE0C1A1532d805C417B770",
+     "pairToken": "0x0000000000000000000000000000000000000000",
+     "launchConfigId": "0",
+     "graduationThreshold": "4200000000000000000"
+    }
+   },
+   {
+    "event": "CurveBuy",
+    "emitter": "0xc6e30e3af487ff0f9cf987bdd6700adadb619fa2",
+    "block": 62438688,
+    "tx": "0x62a36b03d5dcfdc2c1dc69bab050749904c7cfd1cc1ea208a486ddba3fb5f6d4",
+    "args": {
+     "wallet": "0xe33E9E479dF8802cb0866d5d05258bEc4cF62948",
+     "recipient": "0xA3d0308a2BC2c27829AE0C1A1532d805C417B770",
+     "quoteIn": "71428571428571429",
+     "tokensOut": "40000000000000000548571428",
+     "fee": "714285714285714",
+     "tax": "714285714285714"
+    }
+   }
+  ]
+ },
+ "topics": {
+  "TokenLaunched": "0x8d4aad4953d0ca700d468f3753aa14432d1b35b43ec6409f051fb6aa43a89607",
+  "CurveBuy": "0xec36bf571f136799e8dc0b0b8bea4b04d8bd3d43de838aab0d5fc21d4cbfc455",
+  "CurveSell": "0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df",
+  "LaunchSwept": "0xcdb72f157fd3666758a6ce201387ffb52038c7562e4fff352828da1096c4b6b4",
+  "PoolGraduated": "0x0a44ef75df69c534f43cd6c1aa3ef8983065fe5fe79ef9e79f6494e6f258c259",
+  "PoolRegistered": "0x01bf263a1db1652580721573296e1a1fa70b3d4c87f61d02a69c4e1109d2d573",
+  "SnipeTaxCharged": "0x3bc39a5562b28f5fe8f36cecabfbaa12bb969acf05717994709225fc412a9934",
+  "HookFeeCollected": "0xc532c43b3423e14ef72748f1c8291238829ca0af8ba9b67975ad1483485a4b4d",
+  "v4Initialize": "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438",
+  "v4Swap": "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f"
+ },
+ "v4": {
+  "_note": "M2b 冻结的 Uniswap v4 事件 + 定价样本。买家=tx.from(非 Swap.sender=Router、非 HookFeeCollected.payer=memecoin，已链上核验)。勿手改。",
   "graduationTx": {
-    "hash": "0x76cf7df788b8f979aab89274ca33bea3f2992b87d081f09e85e39e22e9739cb9",
-    "events": [
-      {
-        "event": "PoolRegistered",
-        "emitter": "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044",
-        "block": 62426801,
-        "tx": "0x76cf7df788b8f979aab89274ca33bea3f2992b87d081f09e85e39e22e9739cb9",
-        "args": {
-          "poolId": "0x20a88a40b7904a101f12d2d03b0438a95f8c4d2f87c0af40bedcf7674bae6cc7",
-          "memecoin": "0x35B5611B773fEbBeA5CfAC119bCAdA8130d02562",
-          "quoteToken": "0x0000000000000000000000000000000000000000",
-          "creator": "0xeba02D94152b843B01E92C4364463422485df793"
-        }
-      },
-      {
-        "event": "PoolGraduated",
-        "emitter": "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
-        "block": 62426801,
-        "tx": "0x76cf7df788b8f979aab89274ca33bea3f2992b87d081f09e85e39e22e9739cb9",
-        "args": {
-          "token": "0x35B5611B773fEbBeA5CfAC119bCAdA8130d02562",
-          "a": "2669708",
-          "b": "204081632653061225780924614",
-          "c": "4200000000000000093"
-        }
-      }
-    ]
+   "hash": "0x76cf7df788b8f979aab89274ca33bea3f2992b87d081f09e85e39e22e9739cb9",
+   "block": 62426801,
+   "txFrom": "0xc0b3535e207830706656016b62806d8fe9e6ae6e",
+   "events": [
+    {
+     "event": "Initialize",
+     "emitter": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+     "args": {
+      "id": "0x20a88a40b7904a101f12d2d03b0438a95f8c4d2f87c0af40bedcf7674bae6cc7",
+      "currency0": "0x0000000000000000000000000000000000000000",
+      "currency1": "0x35B5611B773fEbBeA5CfAC119bCAdA8130d02562",
+      "fee": 0,
+      "tickSpacing": 200,
+      "hooks": "0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044",
+      "sqrtPriceX96": "552276925551777202551310164101516",
+      "tick": 176998
+     }
+    },
+    {
+     "event": "Swap",
+     "emitter": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+     "args": {
+      "id": "0x20a88a40b7904a101f12d2d03b0438a95f8c4d2f87c0af40bedcf7674bae6cc7",
+      "sender": "0x8876789976dEcBfCbBbe364623C63652db8C0904",
+      "amount0": "-217770000000000000",
+      "amount1": "10060020585693040199632390",
+      "sqrtPriceX96": "525052931075511910590033304267766",
+      "liquidity": "29277002188455995797380",
+      "tick": 175987,
+      "fee": 0
+     }
+    },
+    {
+     "event": "HookFeeCollected",
+     "emitter": "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044",
+     "args": {
+      "poolId": "0x20a88a40b7904a101f12d2d03b0438a95f8c4d2f87c0af40bedcf7674bae6cc7",
+      "payer": "0x35B5611B773fEbBeA5CfAC119bCAdA8130d02562",
+      "amount0": "100600205856930401996323",
+      "amount1": "201200411713860803992647"
+     }
+    }
+   ]
   },
-  "launchTx": {
-    "hash": "0x62a36b03d5dcfdc2c1dc69bab050749904c7cfd1cc1ea208a486ddba3fb5f6d4",
-    "events": [
-      {
-        "event": "TokenLaunched",
-        "emitter": "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
-        "block": 62438688,
-        "tx": "0x62a36b03d5dcfdc2c1dc69bab050749904c7cfd1cc1ea208a486ddba3fb5f6d4",
-        "args": {
-          "token": "0x4d7a45D516BF797d0721135F1FAe3D1D0b0a4f04",
-          "curve": "0xc6e30E3af487ff0f9cf987bDD6700aDAdB619fA2",
-          "deployer": "0xA3d0308a2BC2c27829AE0C1A1532d805C417B770",
-          "pairToken": "0x0000000000000000000000000000000000000000",
-          "launchConfigId": "0",
-          "graduationThreshold": "4200000000000000000"
-        }
-      },
-      {
-        "event": "CurveBuy",
-        "emitter": "0xc6e30e3af487ff0f9cf987bdd6700adadb619fa2",
-        "block": 62438688,
-        "tx": "0x62a36b03d5dcfdc2c1dc69bab050749904c7cfd1cc1ea208a486ddba3fb5f6d4",
-        "args": {
-          "wallet": "0xe33E9E479dF8802cb0866d5d05258bEc4cF62948",
-          "recipient": "0xA3d0308a2BC2c27829AE0C1A1532d805C417B770",
-          "quoteIn": "71428571428571429",
-          "tokensOut": "40000000000000000548571428",
-          "fee": "714285714285714",
-          "tax": "714285714285714"
-        }
-      }
-    ]
+  "realSwapTx": {
+   "hash": "0x5ef3d4f302949d2d0ff20bb4930bcc502beebb1cf78916df969c9d39a604c929",
+   "block": 62556844,
+   "txFrom": "0x22d9b82111dc158c0b003249aeaae319f5b08344",
+   "note": "真实用户买单：currency1(meme)=+，用户收到 meme=BUY；currency0(ETH)=−，用户付 ETH。Swap.sender=0x9689(Router)、payer=memecoin，均非买家→买家取 tx.from。",
+   "events": [
+    {
+     "event": "Swap",
+     "emitter": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+     "args": {
+      "id": "0x20a88a40b7904a101f12d2d03b0438a95f8c4d2f87c0af40bedcf7674bae6cc7",
+      "sender": "0x9689992f5b5C09447f15906d8d11214944488341",
+      "amount0": "-96978290238720000",
+      "amount1": "25632599966253470761419541",
+      "sqrtPriceX96": "1253851525974872779224129381075057",
+      "liquidity": "29277002188455995797380",
+      "tick": 193397,
+      "fee": 0
+     }
+    },
+    {
+     "event": "HookFeeCollected",
+     "emitter": "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044",
+     "args": {
+      "poolId": "0x20a88a40b7904a101f12d2d03b0438a95f8c4d2f87c0af40bedcf7674bae6cc7",
+      "payer": "0x35B5611B773fEbBeA5CfAC119bCAdA8130d02562",
+      "amount0": "256325999662534707614195",
+      "amount1": "512651999325069415228390"
+     }
+    }
+   ]
   },
-  "topics": {
-    "TokenLaunched": "0x8d4aad4953d0ca700d468f3753aa14432d1b35b43ec6409f051fb6aa43a89607",
-    "CurveBuy": "0xec36bf571f136799e8dc0b0b8bea4b04d8bd3d43de838aab0d5fc21d4cbfc455",
-    "CurveSell": "0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df",
-    "LaunchSwept": "0xcdb72f157fd3666758a6ce201387ffb52038c7562e4fff352828da1096c4b6b4",
-    "PoolGraduated": "0x0a44ef75df69c534f43cd6c1aa3ef8983065fe5fe79ef9e79f6494e6f258c259",
-    "PoolRegistered": "0x01bf263a1db1652580721573296e1a1fa70b3d4c87f61d02a69c4e1109d2d573",
-    "SnipeTaxCharged": "0x3bc39a5562b28f5fe8f36cecabfbaa12bb969acf05717994709225fc412a9934",
-    "HookFeeCollected": "0xc532c43b3423e14ef72748f1c8291238829ca0af8ba9b67975ad1483485a4b4d",
-    "v4Initialize": "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438",
-    "v4Swap": "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f"
+  "pricingGate": {
+   "_note": "$AI(Artificial Inu) USDG 计价 v4 池 extsload 直读定价。currency0=AI(0x2E<0x5f)=meme，故 memeIsCurrency0=true。链上核验 vs DexScreener≤20%。",
+   "poolId": "0x7aebd80541bfaaf23dbb6e99ce13d4d31c1a84c91414f971eadbff7db5f85995",
+   "token": "0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18",
+   "quote": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+   "quoteSym": "USDG",
+   "memeDec": 18,
+   "quoteDec": 6,
+   "memeIsCurrency0": true,
+   "quoteUsd": 1,
+   "sqrtPriceX96": "40082679562063991241565",
+   "liquidity": "2903661403571976782",
+   "totalSupply": "991320743342180662217086373",
+   "expectedPriceUsd": 0.2558,
+   "dexScreenerUsd": 0.2559,
+   "tolerancePct": 20
   }
+ }
 }

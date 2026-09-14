@@ -65,9 +65,10 @@ event SnipeTaxCharged(...)   // topic0 0x3bc39a5562b28f5fe8f36cecabfbaa12bb969ac
 event PoolRegistered(bytes32 indexed poolId, address memecoin, address quoteToken, address creator)
   topic0 0x01bf263a1db1652580721573296e1a1fa70b3d4c87f61d02a69c4e1109d2d573
 
-event HookFeeCollected(bytes32 indexed poolId, address payer, ...)  // topic0 0xc532c43b…（M2c：payer 定买家）
+event HookFeeCollected(bytes32 indexed poolId, address payer, uint256 amount0, uint256 amount1)  // topic0 0xc532c43b…
 ```
 - `PoolRegistered` 是 **poolId ↔ token 映射的主源**（M2b）；辅源 = PoolManager `Initialize` 命中已跟踪 token。
+- ⚠️ `HookFeeCollected.payer` = **memecoin 合约地址，不是买家**（已核验，详见下方 M2b 结论）。买家取 `tx.from`。
 
 ### v4 PoolManager（M2b）
 ```
@@ -78,6 +79,30 @@ ModifyLiquidity topic0 0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa8
 - v4 Swap 全链每块 ~2.6 条 → **必须按 poolId 精准订阅**，不能全量。poolId 是 indexed，可复用 rebuildSwaps 的定向订阅模式。
 - v4 金额符号与 V3 相反：v4 是用户视角 delta（负 = 用户付出，正 = 用户收到）。normalizeSwap v4 分支必须翻转，并配已知方向的 fixture 单测。
 - 忽略：`CreatorFeeRecipientUpdated 0x308c390e…`、`PoolFeesSwept 0x2f3c4357…`。
+
+## M2b 实现结论（已链上核验，权威）
+
+### 买家 = `tx.from`（**不是** `HookFeeCollected.payer`，也不是 `Swap.sender`）
+链上双样本核验（毕业腿 tx `0x76cf7df7…` + 真实用户买单 tx `0x5ef3d4f3…`）：
+- `HookFeeCollected.payer` 恒等于 **memecoin 合约地址**（= `Initialize.currency1`），并非买家 —— 原 review 的"优先取 payer"假设不成立。
+- `Swap.sender` 是 **Router**（`0x9689…` / `0x8876…`），也不是买家。
+- **真实买家 = `tx.from`**（真实买单 tx.from = `0x22d9b8…`）。故 `normalizeSwapV4` 对买单额外 `getTransaction` 取 `from`，取不到/零地址则不计买家（double-zero 兜底）。
+
+### v4 定价 = `extsload` 直读 PoolManager 状态（无独立池合约）
+- `POOLS_SLOT = 6`；`base = keccak256(abi.encode(poolId, uint256(6)))`。
+- `slot0 @ base`：低 160 位 = `sqrtPriceX96`，次 24 位 = tick（有符号）。
+- `liquidity @ base+3`：低 128 位。**已核验**：读出的 liquidity 与同池 Swap 事件的 `liquidity` 完全一致 → 布局确认。
+- 价格：`(sqrtPriceX96/2^96)² = currency1/currency0 (raw)` → `×10^(dec0−dec1)` 得 human → 取 quote-per-meme → `×quoteUsd`。
+- 深度：全区间(Pons)虚拟储备 `currency0 = L/sqrtP`、`currency1 = L·sqrtP`，报价腿 ×2。
+  ⚠️ **集中流动性(非全区间)池会高估深度**（虚拟储备 > 实际储备）；仅 Pons 全区间毕业池准确。
+
+### 报价币不止原生 ETH：USDG（Global Dollar，$1 稳定币，6 位）
+- 实盘发现 Pons 毕业池可用 **USDG**(`0x5fc5360D…`) 计价（如 $AI/Artificial Inu）。已加入 `config.robinhood.quoteTokens` 且 `quoteUsdPrice` 视 USDG=1。
+- v4 currency 按地址升序排序，原生 ETH(0x0) 恒为最小 → currency0；ERC-20 报价则按地址比较。`memeIsCurrency0 = memeAddr < quoteAddr`。
+
+### 定价门（gate，已通过）
+- $AI（`0x2E8c3116…1e18`，USDG 计价，poolId `0x7aebd80…`）：`extsload` 链上直读价 **$0.25584** vs DexScreener **$0.2559** → 偏差 **0.02%**（门槛 ≤20%）；市值 $253.6M vs FDV $253.2M（0.17%）。
+- 纯函数 `computeV4Metrics` / `classifyV4Swap` 已抽出，冻结样本进 `test/fixtures/robinhood.json` 的 `v4` 段做无网络单测。
 
 ## 曲线募集额（funds）语义 —— 已实测
 
@@ -106,3 +131,5 @@ ModifyLiquidity topic0 0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa8
 - LaunchSwept 交易 `0x99b7e1e4…8fab9`（block 62426800）。
 - 实时样本 TokenLaunched + CurveBuy（token BAO `0x4d7a45D5…`，curve `0xc6e30E3a…`，见 json）——
   验证 `recipient` 才是买家、pairToken=0x0=原生 ETH、graduationThreshold=4.2 ETH。
+- `v4` 段（M2b）：毕业腿 `Initialize/Swap/HookFeeCollected` + 真实用户买单 `Swap/HookFeeCollected`（各含 `txFrom`）
+  + `$AI` USDG 计价池的定价门样本（poolId/sqrtPriceX96/liquidity/期望价）。供 `computeV4Metrics`、`classifyV4Swap`、buyer=tx.from 单测。

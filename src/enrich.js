@@ -1,6 +1,6 @@
-import { getAddress, formatUnits } from 'viem';
+import { getAddress, formatUnits, keccak256, encodeAbiParameters, hexToBigInt, toHex } from 'viem';
 import { httpClient } from './chain.js';
-import { erc20Abi, pairAbi, v3PoolAbi, tokenManagerAbi } from './abi.js';
+import { erc20Abi, pairAbi, v3PoolAbi, tokenManagerAbi, poolManagerV4Abi } from './abi.js';
 import { chainConfig } from './config.js';
 import { recordRpcError } from './health.js';
 import { child } from './logger.js';
@@ -117,7 +117,7 @@ export function resolveQuote(cfg, symOrAddr) {
 }
 
 function quoteUsdPrice(chain, cfg, sym) {
-  if (sym === 'USDT' || sym === 'USDC' || sym === 'BUSD' || sym === 'USD1') return 1;
+  if (sym === 'USDT' || sym === 'USDC' || sym === 'BUSD' || sym === 'USD1' || sym === 'USDG') return 1;
   if (sym === 'WBNB') return bnbUsdCache.get(chain) || cfg.wbnbUsdPriceFallback || 900;
   // Robinhood 原生 ETH 计价：M1 用 fallback 常量(nativeUsdFallback)，M3 接真实 ETH/USD 池刷新缓存。
   if (sym === 'ETH') return nativeUsdCache.get(chain) || cfg.nativeUsdFallback || 4500;
@@ -221,7 +221,57 @@ export function quoteUsd(chain, sym) {
   return quoteUsdPrice(chain, cfg, sym);
 }
 
-// 读池子 -> 流动性/价格/市值。支持 V2(getReserves) 与 V3(slot0)。
+// Uniswap v4 池状态直读（无独立池合约）：extsload 读 PoolManager 内部存储。
+// POOLS_SLOT=6；base=keccak256(abi.encode(poolId, uint256(6)))；slot0@base 打包 sqrtPriceX96(低160位)|tick，
+// liquidity@base+3(低128位)。布局已链上核验(读出 liquidity 与 Swap 事件完全一致)。失败返回 null。
+async function readV4PoolState(chain, poolManager, poolId) {
+  if (!poolManager || /^0x0+$/.test(poolManager) || !poolId) return null;
+  const client = httpClient(chain);
+  const base = keccak256(encodeAbiParameters([{ type: 'bytes32' }, { type: 'uint256' }], [poolId, 6n]));
+  const liqSlot = toHex(hexToBigInt(base) + 3n, { size: 32 });
+  try {
+    const [slot0Raw, liqRaw] = await client.multicall({
+      allowFailure: false,
+      contracts: [
+        { address: poolManager, abi: poolManagerV4Abi, functionName: 'extsload', args: [base] },
+        { address: poolManager, abi: poolManagerV4Abi, functionName: 'extsload', args: [liqSlot] },
+      ],
+    });
+    const slot0 = hexToBigInt(slot0Raw);
+    const sqrtPriceX96 = slot0 & ((1n << 160n) - 1n);
+    const liquidity = hexToBigInt(liqRaw) & ((1n << 128n) - 1n);
+    if (sqrtPriceX96 === 0n) return null;
+    return { sqrtPriceX96, liquidity };
+  } catch (e) {
+    recordRpcError();
+    log.debug({ chain, poolId, err: e.message }, 'readV4PoolState 失败');
+    return null;
+  }
+}
+
+// v4 定价/深度纯函数(无 RPC，供单测冻结断言)。sqrtPriceX96/liquidity 为 bigint。
+// price：(sqrtP/2^96)²=currency1/currency0(raw) → ×10^(dec0−dec1) 得 human → 取 quote-per-meme → ×quoteUsd。
+// depth：全区间(Pons)虚拟储备 currency0=L/sqrtP、currency1=L·sqrtP；报价腿×2。
+//   ⚠️ 集中流动性(非全区间)池会高估深度(虚拟储备>实际储备)；Pons 毕业池为全区间时准确。
+export function computeV4Metrics({ sqrtPriceX96, liquidity, memeIsCurrency0, memeDec = 18, quoteDec = 18, quoteUsd, supplyHuman = 0 }) {
+  const priced = quoteUsd != null;
+  const quoteIsCurrency0 = !memeIsCurrency0;
+  const dec0 = quoteIsCurrency0 ? quoteDec : memeDec;
+  const dec1 = quoteIsCurrency0 ? memeDec : quoteDec;
+  const sqrtP = Number(sqrtPriceX96) / 2 ** 96;
+  const pRaw = sqrtP * sqrtP;                        // currency1/currency0 (raw)
+  const human1per0 = pRaw * 10 ** (dec0 - dec1);     // currency1 per currency0 (human)
+  const priceInQuote = quoteIsCurrency0 ? 1 / human1per0 : human1per0; // quote per meme
+  const priceUsd = (priceInQuote > 0 && priced) ? priceInQuote * quoteUsd : 0;
+  const L = Number(liquidity);
+  const quoteVirtualRaw = quoteIsCurrency0 ? L / sqrtP : L * sqrtP;
+  const quoteHuman = quoteVirtualRaw / 10 ** quoteDec;
+  const liquidityUsd = priced ? quoteHuman * quoteUsd * 2 : 0;
+  return { liquidityUsd, priceUsd, marketCapUsd: (supplyHuman || 0) * priceUsd };
+}
+
+// 读池子 -> 流动性/价格/市值。支持 V2(getReserves)、V3(slot0)、v4(extsload)。
+// v4：pool 传 poolId(bytes32)、poolType='v4'；池地址=cfg.poolManagerV4。currency 排序由地址推导(原生 0x0 恒为 currency0)。
 export async function readPoolMetrics(chain, { pool, poolType, token, quote, decimals, totalSupply }) {
   if (!pool || !quote) return null;
   const cfg = chainConfig(chain);
@@ -234,6 +284,18 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
   const supply = totalSupply ? Number(formatUnits(totalSupply, memeDec)) : 0;
 
   try {
+    if (poolType === 'v4') {
+      const st = await readV4PoolState(chain, cfg.poolManagerV4, pool);
+      if (!st) return null;
+      // v4 currency 按地址升序；原生 ETH(0x0) 恒为最小 → currency0。故 meme 是否 currency0 = memeAddr < quoteAddr。
+      const memeIsCurrency0 = token.toLowerCase() < q.address.toLowerCase();
+      const m = computeV4Metrics({
+        sqrtPriceX96: st.sqrtPriceX96, liquidity: st.liquidity, memeIsCurrency0,
+        memeDec, quoteDec: q.decimals, quoteUsd, supplyHuman: supply,
+      });
+      return { ...m, quoteSymbol: q.sym, priced };
+    }
+
     if (poolType === 'v3') {
       const [slot0, token0, qBal, tBal] = await client.multicall({
         allowFailure: false,

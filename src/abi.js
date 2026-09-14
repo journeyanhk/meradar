@@ -74,7 +74,27 @@ export const ponsCurveEvents = parseAbi([
   'event CurveBuy(address indexed wallet, address indexed recipient, uint256 quoteIn, uint256 tokensOut, uint256 fee, uint256 tax)',
   'event CurveSell(address indexed wallet, address indexed recipient, uint256 tokensIn, uint256 quoteOut, uint256 fee, uint256 tax)',
 ]);
-// Hook 发出：poolId↔token 映射主源（M2b v4 定价用）。
+// Hook 发出：poolId↔token 映射主源（M2b v4 定价用）+ 手续费归集(payer 字段=memecoin 地址，非买家)。
 export const ponsHookEvents = parseAbi([
   'event PoolRegistered(bytes32 indexed poolId, address memecoin, address quoteToken, address creator)',
+  // ⚠️ 链上核验：HookFeeCollected.payer 是 memecoin 合约地址，不是买家；买家取 tx.from（详见 docs）。
+  'event HookFeeCollected(bytes32 indexed poolId, address payer, uint256 amount0, uint256 amount1)',
+]);
+
+// ── Uniswap v4 PoolManager 事件 + extsload（topic0 已链上核验，见 docs/robinhood-pons.md）──
+// 次源：Initialize 命中已跟踪 token（当 PoolRegistered 未登记时兜底）。
+export const v4InitializeEvent = parseAbiItem(
+  'event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)',
+);
+// ⚠️ v4 Swap 是「用户视角」amountX：负=用户付出、正=用户收到（与 V3 池视角相反）。sender=Router。
+export const v4SwapEvent = parseAbiItem(
+  'event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)',
+);
+export const v4ModifyLiquidityEvent = parseAbiItem(
+  'event ModifyLiquidity(bytes32 indexed id, address indexed sender, int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt)',
+);
+// PoolManager 状态直读：POOLS_SLOT=6，base=keccak256(abi.encode(poolId, uint256(6)))，
+// slot0@base 打包 sqrtPriceX96(低160位)|tick(次24位有符号)；liquidity@base+3(低128位)。已链上核验。
+export const poolManagerV4Abi = parseAbi([
+  'function extsload(bytes32 slot) view returns (bytes32)',
 ]);

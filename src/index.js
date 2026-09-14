@@ -2,11 +2,12 @@ import { config, chainConfig } from './config.js';
 import { startServer } from './server.js';
 import { startEngine, backfillRecentCreates } from './engine.js';
 import { httpClient, measureSecPerBlock } from './chain.js';
-import { refreshBnbUsd, getBnbUsd, refreshNativeUsd, getNativeUsd } from './enrich.js';
+import { refreshBnbUsd, getBnbUsd, refreshNativeUsd, getNativeUsd, hasLiveNativeUsd } from './enrich.js';
 import { refreshDynamicQuotes } from './quotePrice.js';
 import { probeStateOverride } from './rpccap.js';
 import { store } from './db.js';
 import * as momentum from './momentum.js';
+import { setNativeUsd } from './health.js';
 import { logger } from './logger.js';
 
 // 启动自检：用当前 HTTP RPC 查最近 30 个区块、某发射台地址的日志，验证 eth_getLogs 未被封。
@@ -55,8 +56,10 @@ async function main() {
     // 原生资产(Robinhood ETH)美元价：启动拉一次 + 每 60s 刷新（复用 BSC ETH/USDT 池，M2b v4 定价依赖它）。
     if (chainConfig(chain).nativeUsdPool) {
       await refreshNativeUsd(chain);
-      logger.info({ chain, nativeUsd: getNativeUsd(chain) }, '原生资产美元价已就绪');
-      setInterval(() => refreshNativeUsd(chain).catch(() => {}), 60_000);
+      setNativeUsd(chain, getNativeUsd(chain), hasLiveNativeUsd(chain));
+      logger.info({ chain, nativeUsd: getNativeUsd(chain), live: hasLiveNativeUsd(chain) }, '原生资产美元价已就绪');
+      if (!hasLiveNativeUsd(chain)) logger.warn({ chain }, '原生资产美元价退回 fallback 常量(BSC 池不可用)，/api/health nativeUsd.live=false');
+      setInterval(() => refreshNativeUsd(chain).then(() => setNativeUsd(chain, getNativeUsd(chain), hasLiveNativeUsd(chain))).catch(() => {}), 60_000);
     }
     // 动态报价币美元价：先刷一遍已登记的（重启热启），之后每 60s 复价过期项（$5000 流动性下限）
     await refreshDynamicQuotes(chain).catch(() => {});

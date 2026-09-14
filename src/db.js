@@ -123,6 +123,28 @@ CREATE TABLE IF NOT EXISTS quote_prices (
   updated_at   INTEGER,
   PRIMARY KEY (chain, address)
 );
+
+-- Pons v4 池登记：poolId↔token 映射 + 池 key 字段(定价用)。
+-- 主源=Hook PoolRegistered(给 token/quote)；次源=PoolManager Initialize(补 currency0/1、fee、tickSpacing、hooks)。
+-- v4 定价靠 extsload 直读 PoolManager 状态(sqrtPriceX96/liquidity)，故这里只存静态 key，不存价格。
+-- 实时成交订阅按本表 pool_id 集合定向订阅 PoolManager.Swap，POOLS_CHANGED 时重建。
+CREATE TABLE IF NOT EXISTS v4_pools (
+  chain        TEXT NOT NULL,
+  pool_id      TEXT NOT NULL,      -- bytes32 (lower)
+  token        TEXT,               -- memecoin (lower)
+  quote        TEXT,               -- quoteToken (lower)；0x0=原生 ETH
+  currency0    TEXT,               -- v4 排序后 currency0(原生恒为 0x0)
+  currency1    TEXT,
+  fee          INTEGER,
+  tick_spacing INTEGER,
+  hooks        TEXT,
+  source       TEXT,               -- registered | initialize
+  block        INTEGER,
+  tx           TEXT,
+  created_at   INTEGER,
+  PRIMARY KEY (chain, pool_id)
+);
+CREATE INDEX IF NOT EXISTS idx_v4_token ON v4_pools(chain, token);
 `);
 
 // 幂等迁移：node:sqlite 错误信息少，用 PRAGMA table_info 判断列是否存在再 ADD COLUMN，
@@ -243,6 +265,22 @@ const stmt = {
   allQuoteTokens: db.prepare(`SELECT chain, address, symbol, decimals FROM quote_tokens`),
   upsertQuotePrice: db.prepare(`INSERT INTO quote_prices (chain, address, price_usd, liquidity_usd, priced, source, updated_at) VALUES (@chain, @address, @price_usd, @liquidity_usd, @priced, @source, @updated_at) ON CONFLICT(chain, address) DO UPDATE SET price_usd=@price_usd, liquidity_usd=@liquidity_usd, priced=@priced, source=@source, updated_at=@updated_at`),
   allQuotePrices: db.prepare(`SELECT chain, address, price_usd, liquidity_usd, priced, updated_at FROM quote_prices`),
+  upsertV4Pool: db.prepare(`
+    INSERT INTO v4_pools (chain, pool_id, token, quote, currency0, currency1, fee, tick_spacing, hooks, source, block, tx, created_at)
+    VALUES (@chain, @pool_id, @token, @quote, @currency0, @currency1, @fee, @tick_spacing, @hooks, @source, @block, @tx, @created_at)
+    ON CONFLICT(chain, pool_id) DO UPDATE SET
+      token=COALESCE(v4_pools.token, excluded.token),
+      quote=COALESCE(v4_pools.quote, excluded.quote),
+      currency0=COALESCE(excluded.currency0, v4_pools.currency0),
+      currency1=COALESCE(excluded.currency1, v4_pools.currency1),
+      fee=COALESCE(excluded.fee, v4_pools.fee),
+      tick_spacing=COALESCE(excluded.tick_spacing, v4_pools.tick_spacing),
+      hooks=COALESCE(excluded.hooks, v4_pools.hooks)
+  `),
+  v4PoolByToken: db.prepare(`SELECT * FROM v4_pools WHERE chain=? AND token=? ORDER BY created_at DESC LIMIT 1`),
+  v4PoolById: db.prepare(`SELECT * FROM v4_pools WHERE chain=? AND pool_id=?`),
+  allV4Pools: db.prepare(`SELECT * FROM v4_pools`),
+  v4PoolsByChain: db.prepare(`SELECT * FROM v4_pools WHERE chain=?`),
 };
 
 export const store = {
@@ -314,4 +352,26 @@ export const store = {
   quoteTokens() { return stmt.allQuoteTokens.all(); },
   setQuotePrice(p) { stmt.upsertQuotePrice.run({ source: null, updated_at: Date.now(), ...p, address: String(p.address).toLowerCase() }); },
   quotePrices() { return stmt.allQuotePrices.all(); },
+  // Pons v4 池：登记/查映射(poolId↔token) + 池 key(定价/订阅用)。地址统一小写。
+  upsertV4Pool(p) {
+    const lc = (v) => (v ? String(v).toLowerCase() : null);
+    stmt.upsertV4Pool.run({
+      chain: p.chain,
+      pool_id: lc(p.pool_id),
+      token: lc(p.token),
+      quote: lc(p.quote),
+      currency0: lc(p.currency0),
+      currency1: lc(p.currency1),
+      fee: p.fee ?? null,
+      tick_spacing: p.tick_spacing ?? null,
+      hooks: lc(p.hooks),
+      source: p.source ?? null,
+      block: p.block ?? null,
+      tx: lc(p.tx),
+      created_at: p.created_at ?? Date.now(),
+    });
+  },
+  v4PoolByToken(chain, token) { return stmt.v4PoolByToken.get(chain, String(token).toLowerCase()); },
+  v4PoolById(chain, poolId) { return stmt.v4PoolById.get(chain, String(poolId).toLowerCase()); },
+  v4Pools(chain) { return chain ? stmt.v4PoolsByChain.all(chain) : stmt.allV4Pools.all(); },
 };

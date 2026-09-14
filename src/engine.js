@@ -1,10 +1,10 @@
-import { watchChain, resubscribeSwaps, registerPonsCurve, seedPonsCurves, ponsTokenOf } from './discover.js';
+import { watchChain, resubscribeSwaps, resubscribeV4Swaps, registerPonsCurve, seedPonsCurves, ponsTokenOf } from './discover.js';
 import { readToken, quoteUsd, resolveQuote, readTokenInfo } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { store } from './db.js';
 import { config, chainConfig } from './config.js';
 import { httpClient, getSecPerBlock } from './chain.js';
-import { fourMemeEvents, ponsFactoryEvents, ponsCurveEvents } from './abi.js';
+import { fourMemeEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents } from './abi.js';
 import { bus, Events } from './bus.js';
 import { startTracker } from './track.js';
 import { discoverPool } from './pool.js';
@@ -237,6 +237,32 @@ async function onSweep(s) {
   log.debug({ chain: s.chain, token: s.address }, 'Pons LaunchSwept(清算中)');
 }
 
+// Pons PoolRegistered(hook 发出，毕业时与 Initialize/Swap 同回执)：poolId↔token 映射主源。
+// 落 v4_pools(含派生 currency0/1，供定价与定向订阅)；若该币已在跟踪 → 接 v4 定价(pool=poolId, pool_type='v4', graduated)。
+// v4 池按 poolId 在 PoolManager 内部标识、无独立池地址，故 candidates.pool 存 poolId、readPoolMetrics 走 v4 分支(extsload 直读)。
+async function onPoolRegistered(p) {
+  const meme = (p.token || '').toLowerCase();
+  const quote = (p.quote || '').toLowerCase();
+  if (!p.poolId || !meme || /^0x0+$/.test(meme)) return;
+  // v4 currency 按地址升序排序，原生 ETH(0x0) 恒为 currency0。
+  const isNative = /^0x0+$/.test(quote);
+  let currency0, currency1;
+  if (isNative || quote < meme) { currency0 = quote; currency1 = meme; }
+  else { currency0 = meme; currency1 = quote; }
+  store.upsertV4Pool({
+    chain: p.chain, pool_id: p.poolId, token: meme, quote,
+    currency0, currency1, source: 'registered', block: p.block, tx: p.tx,
+  });
+  const key = `${p.chain}:${meme}`;
+  const cand = store.get(key);
+  if (!cand) { log.debug({ chain: p.chain, token: meme, poolId: p.poolId }, 'v4 池登记(token 未跟踪，仅存映射)'); return; }
+  const q = resolveQuote(chainConfig(p.chain), p.quote);
+  store.setPool(key, p.poolId, 'v4', q?.sym ?? null); // 内部含 graduated=1 + graduated_at
+  bus.emit(Events.POOLS_CHANGED, { chain: p.chain });
+  bus.emit(Events.UPDATE, { ...store.get(key) });
+  log.info({ chain: p.chain, token: meme, poolId: p.poolId }, 'Pons v4 池登记，已接 v4 定价(graduated)');
+}
+
 // AMM 建池 / 毕业：补池子地址与类型，供 track 定价，并重建成交订阅。
 async function onAmm(c) {
   const key = `${c.chain}:${c.address.toLowerCase()}`;
@@ -251,12 +277,13 @@ async function onAmm(c) {
   bus.emit(Events.UPDATE, { ...store.get(key) });
 }
 
-// 单条动态订阅：覆盖某链所有 active 且已建池的池子；集合变化时整体重建。
+// 单条动态订阅：覆盖某链所有 active 且已建池的 V2/V3 池子；集合变化时整体重建。
+// v4 毕业池(pool_type='v4')走 rebuildV4Swaps 定向订阅 PoolManager，不在此处。
 const swapUnwatch = new Map(); // chain -> unwatch
 function rebuildSwaps(chain) {
   const cfg = chainConfig(chain);
   const pools = store.swapPools()
-    .filter((r) => r.chain === chain && r.pool)
+    .filter((r) => r.chain === chain && r.pool && r.pool_type !== 'v4')
     .map((r) => {
       // resolveQuote 同时吃符号和历史遗留的地址值，两种存法都能解析
       const q = resolveQuote(cfg, r.quote_symbol) || {};
@@ -273,6 +300,27 @@ function rebuildSwaps(chain) {
   swapUnwatch.get(chain)?.();
   swapUnwatch.set(chain, pools.length ? resubscribeSwaps(chain, pools, (sw) => onSwap(sw).catch((e) => log.debug({ err: e.message }, 'onSwap'))) : null);
   setSwapPools(store.swapPools().filter((r) => r.pool).length);
+}
+
+// Pons v4 毕业池定向订阅：按 active 且 pool_type='v4' 的候选取 v4_pools 元信息，按 poolId 集合订阅 PoolManager.Swap。
+const v4SwapUnwatch = new Map(); // chain -> unwatch
+function rebuildV4Swaps(chain) {
+  const cfg = chainConfig(chain);
+  const pm = cfg.poolManagerV4;
+  if (!pm || /^0x0+$/.test(pm)) return;
+  const pools = [];
+  for (const r of store.swapPools().filter((r) => r.chain === chain && r.pool && r.pool_type === 'v4')) {
+    const vp = store.v4PoolById(chain, r.pool) || store.v4PoolByToken(chain, r.address);
+    if (!vp) continue;
+    const q = resolveQuote(cfg, r.quote_symbol) || {};
+    pools.push({
+      poolId: r.pool, token: r.address, quoteSym: q.sym || r.quote_symbol,
+      quoteDecimals: q.decimals || 18, tokenDecimals: r.decimals || 18,
+      memeIsCurrency0: (vp.currency0 || '') === r.address.toLowerCase(),
+    });
+  }
+  v4SwapUnwatch.get(chain)?.();
+  v4SwapUnwatch.set(chain, pools.length ? resubscribeV4Swaps(chain, pm, pools, (sw) => onSwap(sw).catch((e) => log.debug({ err: e.message }, 'onSwap(v4)'))) : null);
 }
 
 // 启动回填：按链上启用的发射台类型分派（Four.meme 事件流 / Pons 曲线）。
@@ -366,6 +414,7 @@ async function backfillPonsLaunches(chain, hours = 2) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const tokenLaunched = ponsFactoryEvents.find((e) => e.name === 'TokenLaunched');
   const poolGraduated = ponsFactoryEvents.find((e) => e.name === 'PoolGraduated');
+  const poolRegistered = ponsHookEvents.find((e) => e.name === 'PoolRegistered');
   const nowMs = Date.now();
   let from = latest > span ? latest - span : 0n;
   let launches = 0;
@@ -428,6 +477,22 @@ async function backfillPonsLaunches(chain, hours = 2) {
       const ts = nowMs - Number(latest - bn) * secPerBlock * 1000;
       await onGraduate({ chain, address: ar.token, tx: l.transactionHash, block: Number(l.blockNumber || 0), ts }).catch(() => {});
     }
+    await sleep(400);
+    // ④ PoolRegistered(hook)：v4 池 poolId↔token 主源。回填停机期间的毕业池，接上 v4 定价/成交订阅。
+    // 命中已登记币 → 落 v4_pools + setPool(poolId, 'v4', graduated)；未跟踪币仅存映射(onPoolRegistered 自处理)。
+    if (lp.hook && !/^0x0+$/.test(lp.hook) && poolRegistered) {
+      let plogs = null;
+      for (let a = 0; a < 3 && plogs === null; a++) {
+        try { plogs = await client.getLogs({ address: lp.hook, event: poolRegistered, fromBlock: from, toBlock: to }); }
+        catch (e) { if (a === 2) log.debug({ chain, err: e.message }, 'Pons 回填 PoolRegistered 分段失败'); else await sleep(600 * (a + 1)); }
+      }
+      for (const l of plogs || []) {
+        const ar = l.args || {};
+        if (!ar.poolId || !ar.memecoin) continue;
+        await onPoolRegistered({ chain, poolId: ar.poolId, token: ar.memecoin, quote: ar.quoteToken, creator: ar.creator, tx: l.transactionHash, block: Number(l.blockNumber || 0) }).catch(() => {});
+      }
+      await sleep(400);
+    }
     from = to + 1n;
     await sleep(400);
   }
@@ -436,9 +501,10 @@ async function backfillPonsLaunches(chain, hours = 2) {
 }
 
 export function startEngine() {
-  // 毕业池集合变化（新毕业 / 归档）时重建单条 Swap 订阅
+  // 毕业池集合变化（新毕业 / 归档）时重建 Swap 订阅（V2/V3 + v4 各一条）
   bus.on(Events.POOLS_CHANGED, ({ chain }) => {
     try { rebuildSwaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildSwaps'); }
+    try { rebuildV4Swaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildV4Swaps'); }
   });
 
   // Pons：从 DB 回灌 curve↔token 映射（重启后实时曲线成交才能按 emitter 反查归属）。
@@ -452,10 +518,11 @@ export function startEngine() {
         onAmm: (c) => onAmm(c).catch((e) => log.debug({ err: e.message }, 'onAmm')),
         onGraduate: (g) => onGraduate(g).catch((e) => log.debug({ err: e.message }, 'onGraduate')),
         onSweep: (s) => onSweep(s).catch((e) => log.debug({ err: e.message }, 'onSweep')),
-        onPoolRegistered: (p) => { log.debug({ chain: p.chain, token: p.token, poolId: p.poolId }, 'Pons PoolRegistered(poolId↔token，M2b v4 定价用)'); },
+        onPoolRegistered: (p) => onPoolRegistered(p).catch((e) => log.debug({ err: e.message }, 'onPoolRegistered')),
       });
       // 启动时按库中已有的毕业池建一次订阅（覆盖重启前已毕业的活跃币）
       try { rebuildSwaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildSwaps(启动)'); }
+      try { rebuildV4Swaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildV4Swaps(启动)'); }
       log.info({ chain }, '链监听已启动');
     } catch (e) {
       log.error({ chain, err: e.message }, '链监听启动失败（检查 RPC 配置）');

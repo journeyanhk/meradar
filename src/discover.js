@@ -1,7 +1,7 @@
 import { parseAbiItem, formatUnits } from 'viem';
-import { wsClient } from './chain.js';
+import { wsClient, httpClient } from './chain.js';
 import { chainConfig } from './config.js';
-import { fourMemeEvents, swapEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents } from './abi.js';
+import { fourMemeEvents, swapEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents, v4SwapEvent } from './abi.js';
 import { recordWsLog, recordRpcError } from './health.js';
 import { child } from './logger.js';
 
@@ -293,4 +293,69 @@ export function normalizeSwap(l, p, chain) {
   // ⚠️ 若将来新增「历史 Swap 回填」，勿复用此处的 Date.now()——需按块高估算
   //    ts = now − (latest − blockNumber) × 区块间隔，与 backfill 中曲线成交的口径一致。
   return { chain, address: p.token, account, side, quoteHuman, quoteSym: p.quoteSym, tokenHuman, ts: Date.now() };
+}
+
+/**
+ * Pons v4 毕业池成交：按 poolId 集合定向订阅 PoolManager.Swap（indexed id → 节点侧 topic 过滤）。
+ * pools: [{ poolId, token, quoteSym, quoteDecimals, tokenDecimals, memeIsCurrency0 }]
+ * 与 resubscribeSwaps 同产出归一化成交对象，交由 engine.onSwap 落库。POOLS_CHANGED 时整体重建。
+ */
+export function resubscribeV4Swaps(chain, poolManager, pools, onSwap) {
+  const client = wsClient(chain);
+  if (!pools.length || !poolManager || /^0x0+$/.test(poolManager)) return () => {};
+  const meta = new Map(pools.map((p) => [String(p.poolId).toLowerCase(), p]));
+  const un = client.watchEvent({
+    address: poolManager,
+    event: v4SwapEvent,
+    args: { id: pools.map((p) => p.poolId) }, // indexed bytes32 id → 节点侧按 poolId 过滤
+    strict: false,
+    onLogs: (logs) => {
+      recordWsLog(chain);
+      for (const l of logs) {
+        const p = meta.get(String(l.args?.id || '').toLowerCase());
+        if (!p) continue;
+        normalizeSwapV4(l, p, chain)
+          .then((norm) => { if (norm) onSwap(norm); })
+          .catch((e) => log.debug({ err: e.message }, 'v4 swap 解码失败'));
+      }
+    },
+    onError: (e) => { recordRpcError(); log.warn({ chain, err: e.message }, 'v4 swap 订阅错误(自动重连)'); },
+  });
+  log.info({ chain, pools: pools.length }, '重建 Pons v4 成交订阅(PoolManager, 按 poolId 定向)');
+  return un;
+}
+
+/**
+ * v4 Swap 方向判定纯函数(无 RPC，供单测冻结断言)。amount0/amount1 为「用户视角」int128 bigint：
+ * 负=用户付出、正=用户收到(与 V3 池视角相反)。meme 收到(>0)=买、付出(<0)=卖；报价腿取反号。
+ * 返回 { side, tokenRaw, quoteRaw }(均正)，无成交返回 null。买家(tx.from)由调用方补。
+ */
+export function classifyV4Swap({ amount0, amount1, memeIsCurrency0 }) {
+  const memeDelta = memeIsCurrency0 ? amount0 : amount1;
+  const quoteDelta = memeIsCurrency0 ? amount1 : amount0;
+  if (memeDelta == null || quoteDelta == null) return null;
+  if (memeDelta > 0n) return { side: 'buy', tokenRaw: memeDelta, quoteRaw: -quoteDelta };
+  if (memeDelta < 0n) return { side: 'sell', tokenRaw: -memeDelta, quoteRaw: quoteDelta };
+  return null;
+}
+
+/**
+ * v4 Swap 归一化。买家=tx.from —— Swap.sender 是 Router、HookFeeCollected.payer 是 memecoin 合约，
+ * 均非真实买家(已链上核验)；故买单额外拉一次 getTransaction 取 from，取不到/零地址则不计买家(double-zero 兜底)。
+ */
+async function normalizeSwapV4(l, p, chain) {
+  const a = l.args || {};
+  const c = classifyV4Swap({ amount0: a.amount0, amount1: a.amount1, memeIsCurrency0: p.memeIsCurrency0 });
+  if (!c || c.quoteRaw <= 0n) return null;
+  let account = null;
+  if (c.side === 'buy' && l.transactionHash) {
+    try {
+      const tx = await httpClient(chain).getTransaction({ hash: l.transactionHash });
+      const from = (tx?.from || '').toLowerCase();
+      if (from && !/^0x0+$/.test(from)) account = from;
+    } catch { /* 拿不到 from → 不计买家 */ }
+  }
+  const quoteHuman = Number(formatUnits(c.quoteRaw, p.quoteDecimals || 18));
+  const tokenHuman = Number(formatUnits(c.tokenRaw, p.tokenDecimals || 18));
+  return { chain, address: p.token, account, side: c.side, quoteHuman, quoteSym: p.quoteSym, tokenHuman, ts: Date.now() };
 }

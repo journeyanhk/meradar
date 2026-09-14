@@ -554,3 +554,78 @@ test('Pons 事件按冻结原始 topics/data 可被 viem 解码（防 ABI 漂移
   assert.equal(dec.args.memecoin.toLowerCase(), src.args.memecoin.toLowerCase());
   assert.equal(dec.args.creator.toLowerCase(), src.args.creator.toLowerCase());
 });
+
+// —— M2b：Uniswap v4 定价 / 方向 / topic0（Robinhood/Pons）——
+import { computeV4Metrics } from '../src/enrich.js';
+import { classifyV4Swap } from '../src/discover.js';
+import { v4InitializeEvent, v4SwapEvent } from '../src/abi.js';
+
+test('v4 事件 topic0 与冻结值一致（防 ABI 漂移）', () => {
+  assert.equal(toEventSelector(v4InitializeEvent), _rh.topics.v4Initialize, 'Initialize topic0');
+  assert.equal(toEventSelector(v4SwapEvent), _rh.topics.v4Swap, 'Swap topic0');
+});
+
+test('classifyV4Swap：meme=currency1 买入（用户收到 meme>0）', () => {
+  // 真实用户买单 fixture：amount1(meme)>0=BUY、amount0(ETH quote)<0=用户付出 → quoteRaw 取反为正
+  const s = _rh.v4.realSwapTx.events.find((e) => e.event === 'Swap').args;
+  const r = classifyV4Swap({ amount0: BigInt(s.amount0), amount1: BigInt(s.amount1), memeIsCurrency0: false });
+  assert.equal(r.side, 'buy');
+  assert.equal(r.tokenRaw, BigInt(s.amount1));
+  assert.equal(r.quoteRaw, -BigInt(s.amount0));
+  assert.ok(r.quoteRaw > 0n, 'quoteRaw 应为正');
+});
+
+test('classifyV4Swap：meme=currency1 卖出（用户付出 meme<0）', () => {
+  const r = classifyV4Swap({ amount0: 5n, amount1: -50n, memeIsCurrency0: false });
+  assert.equal(r.side, 'sell');
+  assert.equal(r.tokenRaw, 50n);
+  assert.equal(r.quoteRaw, 5n);
+});
+
+test('classifyV4Swap：meme=currency0 时按 amount0 判向（符号约定与 V3 池视角相反）', () => {
+  // 用户收到 meme(amount0>0)=买、付出 quote(amount1<0)
+  const buy = classifyV4Swap({ amount0: 100n, amount1: -8n, memeIsCurrency0: true });
+  assert.equal(buy.side, 'buy'); assert.equal(buy.quoteRaw, 8n); assert.equal(buy.tokenRaw, 100n);
+  const sell = classifyV4Swap({ amount0: -100n, amount1: 8n, memeIsCurrency0: true });
+  assert.equal(sell.side, 'sell'); assert.equal(sell.quoteRaw, 8n); assert.equal(sell.tokenRaw, 100n);
+});
+
+test('classifyV4Swap：零 meme delta → null', () => {
+  assert.equal(classifyV4Swap({ amount0: 0n, amount1: 0n, memeIsCurrency0: true }), null);
+});
+
+// GATE：$AI(USDG 计价 v4 池)链上 extsload 定价 vs DexScreener，偏差 ≤20%。
+// sqrtPriceX96/liquidity 为冻结的链上直读值，计算全走 computeV4Metrics 纯函数。
+test('computeV4Metrics 定价门：$AI 链上价 vs DexScreener ≤20%', () => {
+  const g = _rh.v4.pricingGate;
+  const supplyHuman = Number(BigInt(g.totalSupply) / 10n ** BigInt(g.memeDec));
+  const m = computeV4Metrics({
+    sqrtPriceX96: BigInt(g.sqrtPriceX96), liquidity: BigInt(g.liquidity),
+    memeIsCurrency0: g.memeIsCurrency0, memeDec: g.memeDec, quoteDec: g.quoteDec,
+    quoteUsd: g.quoteUsd, supplyHuman,
+  });
+  const dev = Math.abs(m.priceUsd - g.dexScreenerUsd) / g.dexScreenerUsd * 100;
+  assert.ok(dev <= g.tolerancePct, `偏差 ${dev.toFixed(2)}% 应 ≤${g.tolerancePct}%（链上 ${m.priceUsd}, DexScreener ${g.dexScreenerUsd}）`);
+  assert.ok(m.priceUsd > 0 && m.marketCapUsd > 0, '价格/市值应为正');
+});
+
+test('computeV4Metrics：quoteUsd=null(报价币无可信价) → 价格/流动性归零', () => {
+  const m = computeV4Metrics({ sqrtPriceX96: 40082679562063991241565n, liquidity: 2903661403571976782n, memeIsCurrency0: true, memeDec: 18, quoteDec: 6, quoteUsd: null, supplyHuman: 1e9 });
+  assert.equal(m.priceUsd, 0);
+  assert.equal(m.liquidityUsd, 0);
+});
+
+test('Initialize fixture：currency0=原生 ETH(0x0)、currency1=memecoin、tickSpacing=200', () => {
+  const init = _rh.v4.graduationTx.events.find((e) => e.event === 'Initialize').args;
+  assert.match(init.currency0, /^0x0+$/, 'currency0 为原生 ETH');
+  assert.ok(/^0x[0-9a-fA-F]{40}$/.test(init.currency1), 'currency1 为 memecoin 地址');
+  assert.equal(init.tickSpacing, 200);
+});
+
+test('HookFeeCollected.payer=memecoin(非买家)：买家须取 tx.from', () => {
+  // 已链上核验：payer 是 memecoin 合约地址，与 Initialize.currency1 相同；真实买家在 tx.from。
+  const init = _rh.v4.graduationTx.events.find((e) => e.event === 'Initialize').args;
+  const fee = _rh.v4.realSwapTx.events.find((e) => e.event === 'HookFeeCollected').args;
+  assert.equal(fee.payer.toLowerCase(), init.currency1.toLowerCase(), 'payer 等于 memecoin，故不能当买家');
+  assert.ok(/^0x[0-9a-fA-F]{40}$/.test(_rh.v4.realSwapTx.txFrom), 'tx.from 为真实买家');
+});
