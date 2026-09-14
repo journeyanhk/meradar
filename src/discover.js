@@ -1,7 +1,7 @@
 import { parseAbiItem, formatUnits } from 'viem';
 import { wsClient, httpClient } from './chain.js';
 import { chainConfig } from './config.js';
-import { fourMemeEvents, swapEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents, v4SwapEvent } from './abi.js';
+import { fourMemeEvents, swapEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents, v4SwapEvent, v4InitializeEvent } from './abi.js';
 import { recordWsLog, recordRpcError } from './health.js';
 import { child } from './logger.js';
 
@@ -105,6 +105,36 @@ export function watchChain(chain, handlers) {
       unwatchers.push(un);
       log.info({ chain, launchpad: lp.id, address: lp.address }, '订阅 AMM 工厂');
     }
+  }
+
+  // Pons v4 二级来源：PoolManager.Initialize（bytes32 id + currency0/1）。
+  // PoolRegistered(hook) 为主来源，但 hook 事件可能缺失/延迟——Initialize 是 v4 池创建的规范信号，
+  // 也是 Arc 主网 v4 的入口。engine.onV4Initialize 里按 currency0/1 反查已跟踪代币，未登记才落库(source='initialize')。
+  if (cfg.poolManagerV4 && !/^0x0+$/.test(cfg.poolManagerV4)) {
+    const un = client.watchEvent({
+      address: cfg.poolManagerV4,
+      event: v4InitializeEvent,
+      strict: false,
+      onLogs: (logs) => {
+        recordWsLog(chain);
+        for (const l of logs) {
+          try {
+            const a = l.args || {};
+            if (!a.id) continue;
+            handlers.onV4Initialize?.({
+              chain, poolId: a.id,
+              currency0: a.currency0, currency1: a.currency1,
+              fee: a.fee, tickSpacing: a.tickSpacing, hooks: a.hooks,
+              sqrtPriceX96: a.sqrtPriceX96, tick: a.tick,
+              tx: l.transactionHash, block: Number(l.blockNumber || 0),
+            });
+          } catch (e) { log.debug({ err: e.message }, 'v4 Initialize 解码失败'); }
+        }
+      },
+      onError: (e) => { recordRpcError(); log.warn({ chain, err: e.message }, 'v4 Initialize 订阅错误(自动重连)'); },
+    });
+    unwatchers.push(un);
+    log.info({ chain, poolManager: cfg.poolManagerV4 }, '订阅 Pons v4 PoolManager.Initialize(二级来源)');
   }
 
   return () => unwatchers.forEach((u) => { try { u(); } catch { /* noop */ } });
@@ -304,25 +334,34 @@ export function resubscribeV4Swaps(chain, poolManager, pools, onSwap) {
   const client = wsClient(chain);
   if (!pools.length || !poolManager || /^0x0+$/.test(poolManager)) return () => {};
   const meta = new Map(pools.map((p) => [String(p.poolId).toLowerCase(), p]));
-  const un = client.watchEvent({
-    address: poolManager,
-    event: v4SwapEvent,
-    args: { id: pools.map((p) => p.poolId) }, // indexed bytes32 id → 节点侧按 poolId 过滤
-    strict: false,
-    onLogs: (logs) => {
-      recordWsLog(chain);
-      for (const l of logs) {
-        const p = meta.get(String(l.args?.id || '').toLowerCase());
-        if (!p) continue;
-        normalizeSwapV4(l, p, chain)
-          .then((norm) => { if (norm) onSwap(norm); })
-          .catch((e) => log.debug({ err: e.message }, 'v4 swap 解码失败'));
-      }
-    },
-    onError: (e) => { recordRpcError(); log.warn({ chain, err: e.message }, 'v4 swap 订阅错误(自动重连)'); },
-  });
-  log.info({ chain, pools: pools.length }, '重建 Pons v4 成交订阅(PoolManager, 按 poolId 定向)');
-  return un;
+  // 分片：indexed id 数组过滤走节点侧 topic 过滤，部分节点对数组长度设限，按 100 个 poolId 一片订阅。
+  // 陈旧/归档池不在 pools 内(rebuildV4Swaps 仅取 active 候选)，天然退订。
+  const SHARD = 100;
+  const uns = [];
+  const mkOnLogs = () => (logs) => {
+    recordWsLog(chain);
+    for (const l of logs) {
+      const p = meta.get(String(l.args?.id || '').toLowerCase());
+      if (!p) continue;
+      normalizeSwapV4(l, p, chain)
+        .then((norm) => { if (norm) onSwap(norm); })
+        .catch((e) => log.debug({ err: e.message }, 'v4 swap 解码失败'));
+    }
+  };
+  for (let i = 0; i < pools.length; i += SHARD) {
+    const group = pools.slice(i, i + SHARD);
+    const un = client.watchEvent({
+      address: poolManager,
+      event: v4SwapEvent,
+      args: { id: group.map((p) => p.poolId) }, // indexed bytes32 id → 节点侧按 poolId 过滤
+      strict: false,
+      onLogs: mkOnLogs(),
+      onError: (e) => { recordRpcError(); log.warn({ chain, err: e.message }, 'v4 swap 订阅错误(自动重连)'); },
+    });
+    uns.push(un);
+  }
+  log.info({ chain, pools: pools.length, shards: uns.length }, '重建 Pons v4 成交订阅(PoolManager, 按 poolId 定向, 分片)');
+  return () => uns.forEach((u) => { try { u(); } catch { /* noop */ } });
 }
 
 /**

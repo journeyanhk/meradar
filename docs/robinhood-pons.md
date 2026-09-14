@@ -83,10 +83,12 @@ ModifyLiquidity topic0 0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa8
 ## M2b 实现结论（已链上核验，权威）
 
 ### 买家 = `tx.from`（**不是** `HookFeeCollected.payer`，也不是 `Swap.sender`）
-链上双样本核验（毕业腿 tx `0x76cf7df7…` + 真实用户买单 tx `0x5ef3d4f3…`）：
+链上双样本核验：
+- 毕业腿 tx `0x76cf7df788b8f979aab89274ca33bea3f2992b87d081f09e85e39e22e9739cb9`（tx.from `0xc0b3535e…`）。
+- 真实用户买单 tx `0x5ef3d4f3…`（tx.from `0x22d9b82111dc158c0b003249aeaae319f5b08344`）。
 - `HookFeeCollected.payer` 恒等于 **memecoin 合约地址**（= `Initialize.currency1`），并非买家 —— 原 review 的"优先取 payer"假设不成立。
 - `Swap.sender` 是 **Router**（`0x9689…` / `0x8876…`），也不是买家。
-- **真实买家 = `tx.from`**（真实买单 tx.from = `0x22d9b8…`）。故 `normalizeSwapV4` 对买单额外 `getTransaction` 取 `from`，取不到/零地址则不计买家（double-zero 兜底）。
+- **真实买家 = `tx.from`**（真实买单 tx.from = `0x22d9b82111dc158c0b003249aeaae319f5b08344`）。故 `normalizeSwapV4` 对买单额外 `getTransaction` 取 `from`，取不到/零地址则不计买家（double-zero 兜底）。
 
 ### v4 定价 = `extsload` 直读 PoolManager 状态（无独立池合约）
 - `POOLS_SLOT = 6`；`base = keccak256(abi.encode(poolId, uint256(6)))`。
@@ -103,6 +105,11 @@ ModifyLiquidity topic0 0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa8
 ### 定价门（gate，已通过）
 - $AI（`0x2E8c3116…1e18`，USDG 计价，poolId `0x7aebd80…`）：`extsload` 链上直读价 **$0.25584** vs DexScreener **$0.2559** → 偏差 **0.02%**（门槛 ≤20%）；市值 $253.6M vs FDV $253.2M（0.17%）。
 - 纯函数 `computeV4Metrics` / `classifyV4Swap` 已抽出，冻结样本进 `test/fixtures/robinhood.json` 的 `v4` 段做无网络单测。
+
+### v4 池映射双来源（M2b review 补强，已实现）
+- **主源** `PoolRegistered`(hook)：给 `memecoin`/`quoteToken`，`engine.onPoolRegistered` 落 `v4_pools`(`source='registered'`) 并接定价。
+- **辅源** `PoolManager.Initialize`：`discover.watchChain` 按 `cfg.poolManagerV4` 订阅，`engine.onV4Initialize` 按 `currency0/1` 反查已跟踪代币（报价币集合含原生 0x0），未被主源登记才落库(`source='initialize'`)——`store.v4PoolByToken` 命中即早退，同回执并存不重复 emit。这也是 Arc 主网 v4 的入口。
+- **定向订阅分片**：`resubscribeV4Swaps` 按 `id`(indexed bytes32) 数组过滤，按 **≤100 个 poolId** 一片建多条 `watchEvent`，规避部分节点对 topic 数组长度的限制；陈旧/归档池不在 `rebuildV4Swaps` 的 active 集合内，天然退订。
 
 ## 曲线募集额（funds）语义 —— 已实测
 

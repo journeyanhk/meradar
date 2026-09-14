@@ -263,6 +263,40 @@ async function onPoolRegistered(p) {
   log.info({ chain: p.chain, token: meme, poolId: p.poolId }, 'Pons v4 池登记，已接 v4 定价(graduated)');
 }
 
+// PoolManager.Initialize(二级来源)：v4 池创建的规范信号。PoolRegistered(hook) 为主源、优先，
+// 但 hook 事件可能缺失/延迟；Initialize 按 currency0/1 反查已跟踪代币兜底登记(source='initialize')。
+// 同回执里 PoolRegistered 与 Initialize 并存时，v4PoolByToken 命中即早退，不重复落库/emit。
+async function onV4Initialize(i) {
+  if (!i.poolId) return;
+  const c0 = (i.currency0 || '').toLowerCase();
+  const c1 = (i.currency1 || '').toLowerCase();
+  const cfg = chainConfig(i.chain);
+  const quoteSet = new Set(Object.values(cfg.quoteTokens).map((q) => q.address.toLowerCase()));
+  quoteSet.add('0x0000000000000000000000000000000000000000'); // 原生 ETH
+  // 两腿里非报价币的那条是 meme；两条都是/都不是报价币 → 无法判定，跳过。
+  let meme, quote;
+  const c0q = quoteSet.has(c0), c1q = quoteSet.has(c1);
+  if (c0q && !c1q) { meme = c1; quote = c0; }
+  else if (c1q && !c0q) { meme = c0; quote = c1; }
+  else return;
+  if (!meme || /^0x0+$/.test(meme)) return;
+  const key = `${i.chain}:${meme}`;
+  const cand = store.get(key);
+  if (!cand) return; // 未跟踪代币 → 不登记(避免为全网 v4 池落库)
+  if (store.v4PoolByToken(i.chain, meme)) return; // PoolRegistered 已登记为主源 → 让主源优先，早退
+  store.upsertV4Pool({
+    chain: i.chain, pool_id: i.poolId, token: meme, quote,
+    currency0: c0, currency1: c1, fee: i.fee != null ? Number(i.fee) : null,
+    tick_spacing: i.tickSpacing != null ? Number(i.tickSpacing) : null,
+    hooks: i.hooks, source: 'initialize', block: i.block, tx: i.tx,
+  });
+  const q = resolveQuote(cfg, quote);
+  store.setPool(key, i.poolId, 'v4', q?.sym ?? null);
+  bus.emit(Events.POOLS_CHANGED, { chain: i.chain });
+  bus.emit(Events.UPDATE, { ...store.get(key) });
+  log.info({ chain: i.chain, token: meme, poolId: i.poolId, tickSpacing: i.tickSpacing }, 'Pons v4 池 Initialize(二级来源)，已接 v4 定价');
+}
+
 // AMM 建池 / 毕业：补池子地址与类型，供 track 定价，并重建成交订阅。
 async function onAmm(c) {
   const key = `${c.chain}:${c.address.toLowerCase()}`;
@@ -519,6 +553,7 @@ export function startEngine() {
         onGraduate: (g) => onGraduate(g).catch((e) => log.debug({ err: e.message }, 'onGraduate')),
         onSweep: (s) => onSweep(s).catch((e) => log.debug({ err: e.message }, 'onSweep')),
         onPoolRegistered: (p) => onPoolRegistered(p).catch((e) => log.debug({ err: e.message }, 'onPoolRegistered')),
+        onV4Initialize: (i) => onV4Initialize(i).catch((e) => log.debug({ err: e.message }, 'onV4Initialize')),
       });
       // 启动时按库中已有的毕业池建一次订阅（覆盖重启前已毕业的活跃币）
       try { rebuildSwaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildSwaps(启动)'); }
