@@ -293,7 +293,7 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
         sqrtPriceX96: st.sqrtPriceX96, liquidity: st.liquidity, memeIsCurrency0,
         memeDec, quoteDec: q.decimals, quoteUsd, supplyHuman: supply,
       });
-      return { ...m, quoteSymbol: q.sym, priced };
+      return { ...m, quoteSymbol: q.sym, priced, drained: st.liquidity === 0n };
     }
 
     if (poolType === 'v3') {
@@ -318,7 +318,7 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
       const priceUsd = priceInQuote * quoteUsd;
       const quoteBalHuman = Number(formatUnits(qBal, q.decimals));
       const liquidityUsd = quoteBalHuman * quoteUsd * 2;
-      return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: q.sym, priced };
+      return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: q.sym, priced, drained: quoteBalHuman === 0 };
     }
 
     // V2
@@ -334,7 +334,7 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
     const tokenReserve = Number(formatUnits(quoteIsT0 ? reserves[1] : reserves[0], memeDec));
     const liquidityUsd = quoteReserve * quoteUsd * 2;
     const priceUsd = tokenReserve > 0 ? (quoteReserve * quoteUsd) / tokenReserve : 0;
-    return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: q.sym, priced };
+    return { liquidityUsd, priceUsd, marketCapUsd: supply * priceUsd, quoteSymbol: q.sym, priced, drained: quoteReserve === 0 };
   } catch (e) {
     recordRpcError();
     log.warn({ err: e.message, pool, poolType }, '读取池子指标失败');

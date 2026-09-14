@@ -10,6 +10,7 @@ import * as momentum from '../src/momentum.js';
 import { graduatedByCurve } from '../src/pool.js';
 import { goplusCheck } from '../src/goplus.js';
 import { classifyAccount, classifyTokenBuyers, taxPositive, BUYER_DEFAULTS } from '../src/buyer.js';
+import { resolvePrice, sourceOf, PRICE_STALE_MS, PRICE_UNKNOWN_MS } from '../src/price.js';
 
 // —— 1. Four.meme 事件签名的 topic0 必须与真实链上日志一致 ——
 // 这些 topic0 来自实际观测（见 review 报告）。类型排错会导致 selector 变化。
@@ -739,4 +740,96 @@ test('M2c taxPositive：字符串 raw 判正', () => {
   assert.equal(taxPositive('1'), true);
   assert.equal(taxPositive(null), false);
   assert.equal(taxPositive('123456789012345678'), true);
+});
+
+// —— M3-1 priceOf 抽象：冻结「三护栏」真值表（保旧价 / 真归零 / 陈旧上限） ——
+
+test('M3-1 sourceOf：池型 → 来源名', () => {
+  assert.equal(sourceOf('v4'), 'amm-v4');
+  assert.equal(sourceOf('v3'), 'amm-v3');
+  assert.equal(sourceOf('v2'), 'amm-v2');
+  assert.equal(sourceOf(null), 'amm-v2');
+});
+
+test('M3-1 resolvePrice：曲线期有价 → curve 主源 ok', () => {
+  const now = 1_000_000;
+  const px = resolvePrice({
+    now, hasPool: false, poolType: null,
+    poolM: null, curve: { priceUsd: 0.002, fundsUsd: 5000, marketCapUsd: 200000 }, prev: null,
+  });
+  assert.equal(px.priceUsd, 0.002);
+  assert.equal(px.depthUsd, 5000);
+  assert.equal(px.marketCapUsd, 200000);
+  assert.equal(px.source, 'curve');
+  assert.equal(px.state, 'ok');
+  assert.equal(px.updatedAt, now);
+});
+
+test('M3-1 resolvePrice：毕业池有价 → amm-v* 主源 ok（零回归：与旧 poolM 一致）', () => {
+  const now = 2_000_000;
+  const poolM = { priceUsd: 0.05, liquidityUsd: 12000, marketCapUsd: 500000, priced: true, drained: false };
+  const px = resolvePrice({ now, hasPool: true, poolType: 'v3', poolM, curve: null, prev: null });
+  assert.equal(px.priceUsd, 0.05);
+  assert.equal(px.depthUsd, 12000);
+  assert.equal(px.marketCapUsd, 500000);
+  assert.equal(px.source, 'amm-v3');
+  assert.equal(px.state, 'ok');
+});
+
+test('M3-1 resolvePrice：读失败(poolM=null) → 保旧价、绝不写 0', () => {
+  const now = 3_000_000;
+  const prev = { price_usd: 0.05, market_cap_usd: 500000, depth_usd: 12000, price_source: 'amm-v3', price_updated_at: now - 60_000 };
+  const px = resolvePrice({ now, hasPool: true, poolType: 'v3', poolM: null, curve: null, prev });
+  assert.equal(px.priceUsd, 0.05, '保上一次成功价');
+  assert.equal(px.marketCapUsd, 500000);
+  assert.equal(px.depthUsd, 12000);
+  assert.equal(px.source, 'amm-v3');
+  assert.equal(px.state, 'ok', '距上次 1min < 10min → 仍 ok');
+});
+
+test('M3-1 resolvePrice：读失败 + 距上次 >10min → stale（保旧价）', () => {
+  const now = 4_000_000;
+  const prev = { price_usd: 0.05, market_cap_usd: 500000, depth_usd: 12000, price_source: 'amm-v3', price_updated_at: now - (PRICE_STALE_MS + 1) };
+  const px = resolvePrice({ now, hasPool: true, poolType: 'v3', poolM: null, curve: null, prev });
+  assert.equal(px.priceUsd, 0.05);
+  assert.equal(px.state, 'stale');
+  assert.equal(px.stale, true);
+});
+
+test('M3-1 resolvePrice：读失败 + 距上次 >24h → unknown（仍保旧数值不写 0）', () => {
+  const now = 5_000_000_000;
+  const prev = { price_usd: 0.05, market_cap_usd: 500000, depth_usd: 12000, price_source: 'amm-v3', price_updated_at: now - (PRICE_UNKNOWN_MS + 1) };
+  const px = resolvePrice({ now, hasPool: true, poolType: 'v3', poolM: null, curve: null, prev });
+  assert.equal(px.priceUsd, 0.05, 'unknown 也不清零，保护 peak MAX 与下游数学');
+  assert.equal(px.marketCapUsd, 500000);
+  assert.equal(px.state, 'unknown');
+});
+
+test('M3-1 resolvePrice：报价腿枯竭(drained) → 真归零 withdrawn', () => {
+  const now = 6_000_000;
+  const prev = { price_usd: 0.05, market_cap_usd: 500000, depth_usd: 12000, price_source: 'amm-v2', price_updated_at: now - 30_000 };
+  const poolM = { priceUsd: 0, liquidityUsd: 0, marketCapUsd: 0, priced: false, drained: true };
+  const px = resolvePrice({ now, hasPool: true, poolType: 'v2', poolM, curve: null, prev });
+  assert.equal(px.priceUsd, 0, 'rug 真归零');
+  assert.equal(px.depthUsd, 0);
+  assert.equal(px.marketCapUsd, 0);
+  assert.equal(px.state, 'withdrawn');
+  assert.equal(px.source, 'amm-v2');
+  assert.equal(px.updatedAt, now);
+});
+
+test('M3-1 resolvePrice：首见无池无曲线无旧价 → 全 0 + unknown（age=Infinity）', () => {
+  const px = resolvePrice({ now: 7_000_000, hasPool: false, poolType: null, poolM: null, curve: null, prev: null });
+  assert.equal(px.priceUsd, 0);
+  assert.equal(px.marketCapUsd, 0);
+  assert.equal(px.depthUsd, 0);
+  assert.equal(px.state, 'unknown');
+  assert.equal(px.source, null);
+});
+
+test('M3-1 resolvePrice：数值字段恒为 number（不返回 null，保护下游）', () => {
+  const px = resolvePrice({ now: 8_000_000, hasPool: true, poolType: 'v4', poolM: null, curve: null, prev: {} });
+  assert.equal(typeof px.priceUsd, 'number');
+  assert.equal(typeof px.depthUsd, 'number');
+  assert.equal(typeof px.marketCapUsd, 'number');
 });

@@ -194,6 +194,10 @@ ensureColumns('candidates', [
   ['curve', 'curve TEXT'],                             // Pons(curve-per-token)：该币独立曲线合约地址；募集额=curve 余额
   ['natural_buyers_30m', 'natural_buyers_30m INTEGER DEFAULT 0'], // M2c：30min 内首买且无任何标签的地址数(与 new_buyers_30m 并行，暂不入阈值)
   ['soft_flags', 'soft_flags TEXT'],                   // M2c：买家分级软标记 JSON(sniperRatio/botRatio/farmRatio/... )，只展示不门控
+  // M3-1 priceOf：价格来源与最后成功更新时刻。读失败时保旧价+按 price_updated_at 判 stale，重启不丢；
+  // 绝不把市值写 0(4FOUR/币安镇长两次「归零」根因)。source ∈ curve|amm-v2|amm-v3|amm-v4|external。
+  ['price_source', 'price_source TEXT'],
+  ['price_updated_at', 'price_updated_at INTEGER'],
 ]);
 // trades 已有 price(成交时单价 USD)=price_at_trade，无需重复列；只补 mcap_at_trade：
 // 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
@@ -236,6 +240,7 @@ const stmt = {
       depth_usd=@depth_usd, depth_kind=@depth_kind, offers_pct=@offers_pct,
       net_in_30m=@net_in_30m, net_in_1h=@net_in_1h, max_buy_10m=@max_buy_10m,
       buy_ratio_30m=@buy_ratio_30m, new_buyers_30m=@new_buyers_30m, curve_progress_pct=@curve_progress_pct,
+      price_source=@price_source, price_updated_at=@price_updated_at,
       updated_at=@updated_at WHERE key=@key
   `),
   updatePeak: db.prepare(`UPDATE candidates SET peak_mcap_usd=MAX(peak_mcap_usd, @mcap) WHERE key=@key`),
@@ -361,6 +366,7 @@ export const store = {
       key, updated_at: Date.now(),
       volume_usd: 0, depth_usd: 0, depth_kind: 'curve', offers_pct: 0,
       net_in_30m: 0, net_in_1h: 0, max_buy_10m: 0, buy_ratio_30m: 0, new_buyers_30m: 0, curve_progress_pct: 0,
+      price_source: null, price_updated_at: null,
       ...m,
     });
   },

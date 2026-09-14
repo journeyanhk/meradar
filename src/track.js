@@ -1,4 +1,5 @@
 import { readPoolMetrics, resolveQuote, quoteUsd, readCurveFunds } from './enrich.js';
+import { resolvePrice } from './price.js';
 import { scoreCandidate, evaluateTradeSafety } from './score.js';
 import { discoverPool, graduatedByCurve } from './pool.js';
 import { narrativeHit, copycatCount } from './narrative.js';
@@ -128,10 +129,12 @@ export async function pollCandidate(chain, cand) {
   const hits = narrativeHit(cand.name, cand.symbol);
   const copycats = cand.copy_of ? 0 : copycatCount(chain, cand.symbol); // 仅原版累计仿盘热度
 
-  // 深度：曲线期=募集额(funds×报价币美元价，已在 curveMetrics 换算)，毕业后=池储备。
-  let depthUsd, depthKind;
-  if (cand.pool && poolM) { depthUsd = poolM.liquidityUsd || prev?.depth_usd || 0; depthKind = 'amm'; }
-  else { depthUsd = curve?.fundsUsd || prev?.depth_usd || 0; depthKind = 'curve'; }
+  // —— M3-1 priceOf：统一价格来源 + 新鲜度 + 不归零护栏 ——
+  // 读成功→主源(curve/amm-v*)；读失败→保旧价按 price_updated_at 判 stale；报价腿枯竭→真归零(withdrawn)；
+  // >24h 未更新→unknown。数值恒为 number(保护 peak MAX 与下游数学)。
+  const px = resolvePrice({ now: Date.now(), hasPool: !!cand.pool, poolType: cand.pool_type, poolM, curve, prev });
+  const depthUsd = px.depthUsd;
+  const depthKind = px.source === 'curve' ? 'curve' : (cand.pool ? 'amm' : 'curve');
   const offersPct = curve?.offersPct ?? prev?.offers_pct ?? 0;
   // 曲线毕业进度 = funds / maxRaising（同为报价币单位，比值与小数位无关），比「剩余%」直观。
   const maxRaisingHuman = cand.max_raising ? Number(cand.max_raising) / (10 ** quoteDec) : 0;
@@ -212,8 +215,11 @@ export async function pollCandidate(chain, cand) {
     depthKind,
     offersPct,
     curveProgressPct,
-    priceUsd: poolM?.priceUsd || curve?.priceUsd || prev?.price_usd || 0,
-    marketCapUsd: poolM?.marketCapUsd || curve?.marketCapUsd || prev?.market_cap_usd || 0,
+    priceUsd: px.priceUsd,
+    marketCapUsd: px.marketCapUsd,
+    priceSource: px.source,
+    priceUpdatedAt: px.updatedAt,
+    priceState: px.state,
     volumeUsd: curve?.volumeUsd || prev?.volume_usd || 0,
     holders: uniqueBuyers,
     uniqueBuyers,
@@ -256,6 +262,8 @@ export async function pollCandidate(chain, cand) {
     max_buy_10m: flow.maxBuy10,
     buy_ratio_30m: flow.buyRatio30,
     new_buyers_30m: flow.newBuyers30m,
+    price_source: metrics.priceSource,
+    price_updated_at: metrics.priceUpdatedAt,
   });
   store.addSnapshot({
     key: cand.key,
