@@ -156,6 +156,44 @@ export function getBnbUsd(chain) {
   return bnbUsdCache.get(chain) || cfg.wbnbUsdPriceFallback || 900;
 }
 
+// 原生资产(Robinhood 的 ETH)美元价：复用 BSC Pancake ETH/USDT 池(与 refreshBnbUsd 同源同模式，
+// 只读、零成本)。Robinhood 链上暂无可信 ETH/USD 池，M2b 的 v4 定价同样要乘 ETH 价，故必须实时取真实价，
+// 不能写死 4500(实盘 ~2500，写死会让所有美元数字高估 ~80%)。每 60s 刷新，缓存空才回落 nativeUsdFallback。
+// 自动探测 token0，与池子内 token 顺序无关；结果做区间夹逼(200~20000)防脏读。
+export async function refreshNativeUsd(chain) {
+  const cfg = chainConfig(chain);
+  const src = cfg.nativeUsdPool;
+  if (!src?.pool || !src.chain) return;
+  try {
+    const client = httpClient(src.chain);
+    const [reserves, token0] = await client.multicall({
+      allowFailure: false,
+      contracts: [
+        { address: src.pool, abi: pairAbi, functionName: 'getReserves' },
+        { address: src.pool, abi: pairAbi, functionName: 'token0' },
+      ],
+    });
+    const usdtIsT0 = token0.toLowerCase() === String(src.usdt).toLowerCase();
+    const usdtRaw = usdtIsT0 ? reserves[0] : reserves[1];
+    const baseRaw = usdtIsT0 ? reserves[1] : reserves[0];
+    if (baseRaw > 0n) {
+      const price = Number(formatUnits(usdtRaw, src.usdtDecimals ?? 18)) / Number(formatUnits(baseRaw, src.baseDecimals ?? 18));
+      if (price > 200 && price < 20000) nativeUsdCache.set(chain, price);
+    }
+  } catch (e) {
+    log.debug({ chain, err: e.message }, 'refreshNativeUsd 失败(用 fallback)');
+  }
+}
+
+export function getNativeUsd(chain) {
+  const cfg = chainConfig(chain);
+  return nativeUsdCache.get(chain) || cfg.nativeUsdFallback || null;
+}
+
+export function hasLiveNativeUsd(chain) {
+  return nativeUsdCache.has(chain);
+}
+
 // Pons(curve-per-token) 曲线募集额：原生 ETH 计价读 curve 的 ETH 余额；ERC-20 计价读 balanceOf。
 // 实测：原生曲线 curve 余额 == 累计(quoteIn−quoteOut)，是权威且自愈的募集额来源（毕业后归零）。
 // 返回 { fundsRaw:bigint, fundsQuote:number(人类可读报价币) }；失败返回 null。

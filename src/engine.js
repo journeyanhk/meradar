@@ -3,7 +3,7 @@ import { readToken, quoteUsd, resolveQuote, readTokenInfo } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { store } from './db.js';
 import { config, chainConfig } from './config.js';
-import { httpClient } from './chain.js';
+import { httpClient, getSecPerBlock } from './chain.js';
 import { fourMemeEvents, ponsFactoryEvents, ponsCurveEvents } from './abi.js';
 import { bus, Events } from './bus.js';
 import { startTracker } from './track.js';
@@ -43,7 +43,7 @@ function recordCurveTrade(t, cand) {
   const ts = t.ts || Date.now();
   const price = tokenHuman > 0 ? usd / tokenHuman : 0;
   const supply = supplyHumanOf(cand);
-  store.addTrade({ key: cand.key, ts, side, account: t.account, quote_amount: usd, token_amount: tokenHuman, price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null });
+  store.addTrade({ key: cand.key, ts, side, account: t.account, quote_amount: usd, token_amount: tokenHuman, price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null, fee_raw: t.fee != null ? t.fee.toString() : null, tax_raw: t.tax != null ? t.tax.toString() : null });
   if (side === 'buy' && t.account) store.addBuyer(cand.key, t.account, ts);
   recordTradeWrite();
 }
@@ -299,7 +299,8 @@ async function backfillFourMeme(chain, hours = 2) {
   const client = httpClient(chain);
   let latest;
   try { latest = await client.getBlockNumber(); } catch (e) { log.warn({ chain, err: e.message }, '回填取块高失败'); return 0; }
-  const blocksPerHour = Math.round(3600 / 0.45); // BSC ~0.45s/块
+  const blocksPerHour = Math.round(3600 / getSecPerBlock(chain)); // 实测出块间隔（BSC ~0.45s/块）
+  const msPerBlock = getSecPerBlock(chain) * 1000;
   const nowMs = Date.now();
   const span = BigInt(blocksPerHour * hours);
   const chunk = 4000n; // 分段，规避公共 RPC 单次日志范围上限
@@ -333,7 +334,7 @@ async function backfillFourMeme(chain, hours = 2) {
         // ts 用块高估算(BSC ~450ms/块)，避免历史成交在重启后 30 分钟内虚增 buys30m。
         if (!a.token) continue;
         const bn = l.blockNumber != null ? BigInt(l.blockNumber) : latest;
-        const ts = nowMs - Number(latest - bn) * 450;
+        const ts = nowMs - Number(latest - bn) * msPerBlock;
         momentum.onTrade({
           token: a.token, account: a.account || null, price: a.price ?? null,
           cost: a.cost ?? null, funds: a.funds ?? null, offers: a.offers ?? null,
@@ -359,11 +360,12 @@ async function backfillPonsLaunches(chain, hours = 2) {
   const client = httpClient(chain);
   let latest;
   try { latest = await client.getBlockNumber(); } catch (e) { log.warn({ chain, err: e.message }, 'Pons 回填取块高失败'); return 0; }
-  const SEC_PER_BLOCK = 2; // Robinhood 出块间隔保守估算（仅用于窗口跨度与 ts 估算）
-  const span = BigInt(Math.round((3600 * hours) / SEC_PER_BLOCK));
+  const secPerBlock = getSecPerBlock(chain); // 实测出块间隔（Robinhood ~0.1s/块），用于窗口跨度与 ts 估算
+  const span = BigInt(Math.round((3600 * hours) / secPerBlock));
   const chunk = 1400n; // 官方 HTTP 段上限 + 429 规避
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const tokenLaunched = ponsFactoryEvents.find((e) => e.name === 'TokenLaunched');
+  const poolGraduated = ponsFactoryEvents.find((e) => e.name === 'PoolGraduated');
   const nowMs = Date.now();
   let from = latest > span ? latest - span : 0n;
   let launches = 0;
@@ -404,12 +406,27 @@ async function backfillPonsLaunches(chain, hours = 2) {
       const tokenRaw = isBuy ? ar.tokensOut : ar.tokensIn;
       if (quoteRaw == null || tokenRaw == null || tokenRaw === 0n) continue;
       const bn = l.blockNumber != null ? BigInt(l.blockNumber) : latest;
-      const ts = nowMs - Number(latest - bn) * SEC_PER_BLOCK * 1000;
+      const ts = nowMs - Number(latest - bn) * secPerBlock * 1000;
       momentum.onTrade({
         token, account: isBuy ? (ar.recipient || null) : null,
         price: (quoteRaw * (10n ** 18n)) / tokenRaw, cost: quoteRaw, funds: null, offers: null,
         isBuy, ts,
       });
+    }
+    await sleep(400);
+    // ③ PoolGraduated（停机期间的毕业回填）：命中已登记币 → markGraduated，避免毕业币卡在「曲线期、募集 $0、价格冻结」。
+    // 注：launch 在窗口外的毕业币此时 store 无行，onGraduate 会自行早退；运行中币的余额归零自愈留待 M2b v4 池查找。
+    let glogs = null;
+    for (let a = 0; a < 3 && glogs === null; a++) {
+      try { glogs = await client.getLogs({ address: lp.factory, event: poolGraduated, fromBlock: from, toBlock: to }); }
+      catch (e) { if (a === 2) log.debug({ chain, err: e.message }, 'Pons 回填 PoolGraduated 分段失败'); else await sleep(600 * (a + 1)); }
+    }
+    for (const l of glogs || []) {
+      const ar = l.args || {};
+      if (!ar.token) continue;
+      const bn = l.blockNumber != null ? BigInt(l.blockNumber) : latest;
+      const ts = nowMs - Number(latest - bn) * secPerBlock * 1000;
+      await onGraduate({ chain, address: ar.token, tx: l.transactionHash, block: Number(l.blockNumber || 0), ts }).catch(() => {});
     }
     from = to + 1n;
     await sleep(400);

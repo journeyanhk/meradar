@@ -152,6 +152,10 @@ ensureColumns('candidates', [
 // 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
 ensureColumns('trades', [
   ['mcap_at_trade', 'mcap_at_trade REAL'],
+  // Pons 曲线成交自带 fee/tax(报价币最小单位, raw 字符串)；Four.meme 事件无此字段 → 留空。
+  // 供 M2c 买家质量分级(tax>0 视为狙击非自然买家)与 M4 纸面引擎扣税，现在先落库避免历史数据缺口。
+  ['fee_raw', 'fee_raw TEXT'],
+  ['tax_raw', 'tax_raw TEXT'],
 ]);
 
 const stmt = {
@@ -215,7 +219,7 @@ const stmt = {
     FROM candidates
   `),
   missedKills: db.prepare(`SELECT COUNT(*) AS missed FROM candidates WHERE status='rejected' AND peak_mcap_usd >= 1000000`),
-  insertTrade: db.prepare(`INSERT INTO trades (key, ts, side, account, quote_amount, token_amount, price, mcap_at_trade) VALUES (@key, @ts, @side, @account, @quote_amount, @token_amount, @price, @mcap_at_trade)`),
+  insertTrade: db.prepare(`INSERT INTO trades (key, ts, side, account, quote_amount, token_amount, price, mcap_at_trade, fee_raw, tax_raw) VALUES (@key, @ts, @side, @account, @quote_amount, @token_amount, @price, @mcap_at_trade, @fee_raw, @tax_raw)`),
   lastTradeTs: db.prepare(`SELECT MAX(ts) AS ts FROM trades WHERE key=?`),
   deleteOldTrades: db.prepare(`DELETE FROM trades WHERE ts < ?`),
   countTrades: db.prepare(`SELECT COUNT(*) AS n FROM trades`),
@@ -279,7 +283,7 @@ export const store = {
   activeCandidates(limit = 400) { return stmt.activeCandidates.all(limit); },
   feed(limit = 200) { return stmt.listFeed.all(limit); },
   stats(since24h) { return { ...stmt.stats.get(since24h), missed: stmt.missedKills.get().missed }; },
-  addTrade(t) { stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, mcap_at_trade: null, ...t }); },
+  addTrade(t) { stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, mcap_at_trade: null, fee_raw: null, tax_raw: null, ...t }); },
   lastTradeTs(key) { return stmt.lastTradeTs.get(key)?.ts ?? null; },
   purgeTrades(beforeMs) { return stmt.deleteOldTrades.run(beforeMs).changes; },
   tradeCount() { return stmt.countTrades.get().n; },

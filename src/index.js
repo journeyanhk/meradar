@@ -1,8 +1,8 @@
 import { config, chainConfig } from './config.js';
 import { startServer } from './server.js';
 import { startEngine, backfillRecentCreates } from './engine.js';
-import { httpClient } from './chain.js';
-import { refreshBnbUsd, getBnbUsd } from './enrich.js';
+import { httpClient, measureSecPerBlock } from './chain.js';
+import { refreshBnbUsd, getBnbUsd, refreshNativeUsd, getNativeUsd } from './enrich.js';
 import { refreshDynamicQuotes } from './quotePrice.js';
 import { probeStateOverride } from './rpccap.js';
 import { store } from './db.js';
@@ -43,11 +43,20 @@ async function main() {
   for (const chain of config.enabledChains) {
     if (!config.rpc[chain]?.http) continue;
     await selfCheckLogs(chain);
+    // 出块间隔实测：回填窗口跨度与历史成交 ts 估算都靠它（Robinhood ~0.1s，写死 2s 会让新鲜度误判）。
+    const spb = await measureSecPerBlock(chain);
+    logger.info({ chain, secPerBlock: Number(spb.toFixed(3)) }, '出块间隔已实测');
     await probeStateOverride(chain).catch(() => {}); // 往返模拟能力探测，结果进 /api/health
     if (chainConfig(chain).bnbUsdPool) {
       await refreshBnbUsd(chain);
       logger.info({ chain, bnbUsd: getBnbUsd(chain) }, 'BNB 现价已就绪');
       setInterval(() => refreshBnbUsd(chain).catch(() => {}), 60_000);
+    }
+    // 原生资产(Robinhood ETH)美元价：启动拉一次 + 每 60s 刷新（复用 BSC ETH/USDT 池，M2b v4 定价依赖它）。
+    if (chainConfig(chain).nativeUsdPool) {
+      await refreshNativeUsd(chain);
+      logger.info({ chain, nativeUsd: getNativeUsd(chain) }, '原生资产美元价已就绪');
+      setInterval(() => refreshNativeUsd(chain).catch(() => {}), 60_000);
     }
     // 动态报价币美元价：先刷一遍已登记的（重启热启），之后每 60s 复价过期项（$5000 流动性下限）
     await refreshDynamicQuotes(chain).catch(() => {});
@@ -79,10 +88,11 @@ async function main() {
   }
   setInterval(cleanupStaleSeen, 3600_000);
 
-  // 启动回填最近 ~2h 的 TokenCreate，让慢热型老币也能进入跟踪
+  // 启动回填最近 TokenCreate（默认 ~2h，链可用 backfillHours 覆盖：Robinhood ~0.1s/块，2h=7.2万块过重→取 1h）
   for (const chain of config.enabledChains) {
     if (!config.rpc[chain]?.http) continue;
-    await backfillRecentCreates(chain, 2).catch((e) => logger.warn({ chain, err: e.message }, '回填失败(忽略)'));
+    const hours = chainConfig(chain).backfillHours ?? 2;
+    await backfillRecentCreates(chain, hours).catch((e) => logger.warn({ chain, err: e.message }, '回填失败(忽略)'));
   }
 
   // 回灌 active 币的买家集合（buyers 表 -> 内存动量），保持去重与计数在重启后连续

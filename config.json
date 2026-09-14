@@ -56,6 +56,7 @@
       "bnbUsdPool": "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE",
       "explorer": "https://bscscan.com",
       "gmgnBase": "https://gmgn.ai/bsc/token",
+      "secPerBlockFallback": 0.45,
       "wbnbUsdPriceFallback": 900,
       "templateCodeHashes": [
         "0xbb6d668c425d9a1fa95dc0378c651bde6aae03ec03f861338211b55d14aa483e",
@@ -107,6 +108,7 @@
       "wrappedNative": "0x0000000000000000000000000000000000000000",
       "explorer": "https://testnet.arcscan.app",
       "gmgnBase": "",
+      "secPerBlockFallback": 0.5,
       "wbnbUsdPriceFallback": 1,
       "allowUnverifiedStrong": false,
       "quoteTokens": {
@@ -132,10 +134,13 @@
       "multicall3": "0xcA11bde05977b3631167028862bE2a173976CA11",
       "wrappedNative": "0x0000000000000000000000000000000000000000",
       "poolManagerV4": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
-      "explorer": "https://explorer.chain.robinhood.com",
+      "explorer": "https://robinhoodchain.blockscout.com",
       "gmgnBase": "",
-      "nativeUsdFallback": 4500,
-      "wbnbUsdPriceFallback": 4500,
+      "secPerBlockFallback": 0.1,
+      "nativeUsdFallback": 2500,
+      "nativeUsdPool": { "chain": "bsc", "pool": "0x531FEbfeb9a61D948c384ACFBe6dCc51057AEa7e", "usdt": "0x55d398326f99059fF775485246999027B3197955", "usdtDecimals": 18, "baseDecimals": 18 },
+      "backfillHours": 1,
+      "wbnbUsdPriceFallback": 2500,
       "allowUnverifiedStrong": false,
       "quoteTokens": {
         "ETH": { "address": "0x0000000000000000000000000000000000000000", "decimals": 18, "native": true }

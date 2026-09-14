@@ -226,6 +226,7 @@ function routePonsCurve(chain, lp, l, handlers) {
   handlers.onTrade?.({
     chain, address: token, account, launchpad: lp.id, label: lp.label,
     price, amount: tokenRaw, cost: quoteRaw, offers: null, funds: null,
+    fee: a.fee ?? null, tax: a.tax ?? null, // 曲线自带手续费/税(报价币最小单位)，落库供 M2c/M4
     isBuy, ts: Date.now(),
   });
 }
