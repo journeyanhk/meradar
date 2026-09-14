@@ -146,6 +146,7 @@ ensureColumns('candidates', [
   ['max_raising', 'max_raising TEXT'],                 // 毕业阈值(报价币最小单位, raw)；曲线进度=funds/maxRaising
   ['curve_progress_pct', 'curve_progress_pct REAL DEFAULT 0'],
   ['graduated_at', 'graduated_at INTEGER'],            // 毕业(建池)时刻 ms；毕业腿强提示要求 ≤60min。老数据为 NULL
+  ['curve', 'curve TEXT'],                             // Pons(curve-per-token)：该币独立曲线合约地址；募集额=curve 余额
 ]);
 // trades 已有 price(成交时单价 USD)=price_at_trade，无需重复列；只补 mcap_at_trade：
 // 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
@@ -167,6 +168,12 @@ const stmt = {
   setPool: db.prepare(`UPDATE candidates SET pool=@pool, pool_type=@pool_type, quote_symbol=COALESCE(quote_symbol,@quote), graduated=1, graduated_at=COALESCE(graduated_at,@updated_at), updated_at=@updated_at WHERE key=@key`),
   // 曲线期报价币信息：quote_symbol 不覆盖已有值(毕业池可能已写)，max_raising/launch_time 补空。
   setCurveInfo: db.prepare(`UPDATE candidates SET quote_symbol=COALESCE(quote_symbol,@quote_symbol), max_raising=COALESCE(@max_raising,max_raising), launch_time=COALESCE(launch_time,@launch_time), updated_at=@updated_at WHERE key=@key`),
+  // Pons：登记该币曲线合约地址（募集额靠读 curve 余额）。
+  setCurve: db.prepare(`UPDATE candidates SET curve=@curve, updated_at=@updated_at WHERE key=@key`),
+  // Pons 毕业事件(PoolGraduated)：暂无池地址(v4 定价见 M2b)，先记毕业时刻供新鲜度/前端「已毕业」态。
+  markGraduated: db.prepare(`UPDATE candidates SET graduated=1, graduated_at=COALESCE(graduated_at,@updated_at), updated_at=@updated_at WHERE key=@key`),
+  // 启动回灌 curve↔token 映射（Pons 实时订阅按 emitter=curve 反查 token）。
+  curveTokens: db.prepare(`SELECT key, chain, address, curve FROM candidates WHERE curve IS NOT NULL AND status != 'archived'`),
   promote: db.prepare(`UPDATE candidates SET status='active', updated_at=@updated_at WHERE key=@key AND status='seen'`),
   setCopyOf: db.prepare(`UPDATE candidates SET copy_of=@copy_of, updated_at=@updated_at WHERE key=@key`),
   updateMetrics: db.prepare(`
@@ -243,6 +250,9 @@ export const store = {
   setCurveInfo(key, { quote_symbol = null, max_raising = null, launch_time = null }) {
     stmt.setCurveInfo.run({ key, quote_symbol, max_raising, launch_time, updated_at: Date.now() });
   },
+  setCurve(key, curve) { stmt.setCurve.run({ key, curve: curve ? String(curve).toLowerCase() : null, updated_at: Date.now() }); },
+  markGraduated(key, at = Date.now()) { stmt.markGraduated.run({ key, updated_at: at }); },
+  curveTokens() { return stmt.curveTokens.all(); },
   promote(key) { return stmt.promote.run({ key, updated_at: Date.now() }).changes > 0; },
   setCopyOf(key, copy_of) { stmt.setCopyOf.run({ key, copy_of, updated_at: Date.now() }); },
   updateMetrics(key, m) {

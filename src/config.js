@@ -27,6 +27,12 @@ export const config = {
   rpc: {
     bsc: { http: env('BSC_HTTP'), ws: env('BSC_WS') },
     arc: { http: env('ARC_HTTP'), ws: env('ARC_WS') },
+    // Robinhood Chain：官方 HTTP 做 getLogs 回填(≤1400 块/段)，dRPC 公共 WS 做实时订阅。
+    // 两者都有默认公共端点，未配 .env 也能跑（付费端点更稳，可在 .env 覆盖）。
+    robinhood: {
+      http: env('ROBINHOOD_HTTP', 'https://rpc.mainnet.chain.robinhood.com'),
+      ws: env('ROBINHOOD_WS', 'wss://robinhood.drpc.org'),
+    },
   },
   telegram: {
     token: env('TELEGRAM_BOT_TOKEN'),

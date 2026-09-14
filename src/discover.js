@@ -1,11 +1,29 @@
 import { parseAbiItem, formatUnits } from 'viem';
 import { wsClient } from './chain.js';
 import { chainConfig } from './config.js';
-import { fourMemeEvents, swapEvents } from './abi.js';
+import { fourMemeEvents, swapEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents } from './abi.js';
 import { recordWsLog, recordRpcError } from './health.js';
 import { child } from './logger.js';
 
 const log = child('discover');
+
+// Pons(curve-per-token)：curve 合约地址 → 代币地址 的映射。
+// 曲线成交(CurveBuy/Sell)按 topic0 全量订阅，emitter=curve，靠本表反查它属于哪个代币。
+// 由 TokenLaunched 实时写入 + 启动时从 DB 回灌(seedPonsCurves)，重启不丢。
+const ponsCurveMap = new Map(); // `${chain}:${curveLower}` -> tokenAddress
+export function registerPonsCurve(chain, curve, token) {
+  if (!chain || !curve || !token) return;
+  ponsCurveMap.set(`${chain}:${String(curve).toLowerCase()}`, token);
+}
+export function ponsTokenOf(chain, curve) {
+  return ponsCurveMap.get(`${chain}:${String(curve || '').toLowerCase()}`) || null;
+}
+export function seedPonsCurves(rows) {
+  let n = 0;
+  for (const r of rows) { if (r.chain && r.curve && r.address) { registerPonsCurve(r.chain, r.curve, r.address); n++; } }
+  if (n) log.info({ n }, 'Pons curve↔token 映射已回灌');
+  return n;
+}
 
 function pickToken(token0, token1, quoteSet) {
   const t0 = token0.toLowerCase();
@@ -29,6 +47,12 @@ export function watchChain(chain, handlers) {
   const unwatchers = [];
 
   for (const lp of cfg.launchpads) {
+    // Pons(curve-per-token)：用 factory/hook 而非单一 address，且需三条订阅，先于下方 address 守卫处理。
+    if (lp.type === 'curve-per-token') {
+      subscribePonsCurve(chain, lp, client, handlers, unwatchers);
+      continue;
+    }
+
     if (!lp.address || /^0x0+$/.test(lp.address)) {
       log.warn({ chain, launchpad: lp.id }, '工厂地址未配置，跳过（待核实后填入 config.json）');
       continue;
@@ -107,6 +131,103 @@ function routeFourMeme(chain, lp, l, handlers) {
       isBuy: name === 'TokenPurchase', ts: Date.now(),
     });
   }
+}
+
+/**
+ * Pons(curve-per-token) 三条订阅：
+ *  ① 工厂 → TokenLaunched(登记 curve↔token + onCreate) / PoolGraduated(onGraduate) / LaunchSwept(onSweep)
+ *  ② hook  → PoolRegistered(poolId↔token，M2b v4 定价用；M1 仅转发/登记)
+ *  ③ 曲线成交 → CurveBuy/CurveSell 按 topic0 全量订阅(无地址过滤)，emitter=curve 反查 token → onTrade
+ * 全量订阅是刻意选择：curve 每币一个地址、数量随发行增长，用地址数组过滤反而更重；
+ * topic0 过滤由节点侧完成，未知 curve 的成交在本地被 map 命中失败即丢弃。
+ */
+function subscribePonsCurve(chain, lp, client, handlers, unwatchers) {
+  // ① 工厂事件
+  if (lp.factory && !/^0x0+$/.test(lp.factory)) {
+    const un = client.watchEvent({
+      address: lp.factory, events: ponsFactoryEvents, strict: false,
+      onLogs: (logs) => {
+        recordWsLog(chain);
+        for (const l of logs) { try { routePonsFactory(chain, lp, l, handlers); } catch (e) { log.debug({ err: e.message }, 'pons 工厂事件解码失败'); } }
+      },
+      onError: (e) => { recordRpcError(); log.warn({ chain, launchpad: lp.id, err: e.message }, 'watchEvent 错误(自动重连)'); },
+    });
+    unwatchers.push(un);
+    log.info({ chain, launchpad: lp.id, factory: lp.factory }, '订阅 Pons 工厂事件(TokenLaunched/PoolGraduated/LaunchSwept)');
+  }
+  // ② hook PoolRegistered（poolId↔token）
+  if (lp.hook && !/^0x0+$/.test(lp.hook)) {
+    const un = client.watchEvent({
+      address: lp.hook, events: ponsHookEvents, strict: false,
+      onLogs: (logs) => {
+        recordWsLog(chain);
+        for (const l of logs) {
+          try {
+            const a = l.args || {};
+            if (l.eventName !== 'PoolRegistered' || !a.poolId) continue;
+            handlers.onPoolRegistered?.({ chain, poolId: a.poolId, token: a.memecoin, quote: a.quoteToken, creator: a.creator, tx: l.transactionHash, block: Number(l.blockNumber || 0) });
+          } catch (e) { log.debug({ err: e.message }, 'pons hook 事件解码失败'); }
+        }
+      },
+      onError: (e) => { recordRpcError(); log.warn({ chain, launchpad: lp.id, err: e.message }, 'watchEvent 错误(自动重连)'); },
+    });
+    unwatchers.push(un);
+    log.info({ chain, launchpad: lp.id, hook: lp.hook }, '订阅 Pons hook 事件(PoolRegistered)');
+  }
+  // ③ 曲线成交（topic0 全量订阅）
+  const un = client.watchEvent({
+    events: ponsCurveEvents, strict: false,
+    onLogs: (logs) => {
+      recordWsLog(chain);
+      for (const l of logs) { try { routePonsCurve(chain, lp, l, handlers); } catch (e) { log.debug({ err: e.message }, 'pons 曲线成交解码失败'); } }
+    },
+    onError: (e) => { recordRpcError(); log.warn({ chain, launchpad: lp.id, err: e.message }, 'watchEvent 错误(自动重连)'); },
+  });
+  unwatchers.push(un);
+  log.info({ chain, launchpad: lp.id }, '订阅 Pons 曲线成交(CurveBuy/CurveSell, topic0 全量)');
+}
+
+function routePonsFactory(chain, lp, l, handlers) {
+  const name = l.eventName;
+  const a = l.args || {};
+  if (name === 'TokenLaunched') {
+    if (!a.token || !a.curve) return;
+    registerPonsCurve(chain, a.curve, a.token);
+    handlers.onCreate?.({
+      chain, address: a.token, launchpad: lp.id, label: lp.label,
+      creator: a.deployer || null, name: null, symbol: null, totalSupply: null, launchTime: null,
+      curve: a.curve,
+      quote: a.pairToken, // 0x0=原生 ETH 计价；否则 ERC-20 计价
+      graduationThreshold: a.graduationThreshold != null ? a.graduationThreshold.toString() : null,
+      tx: l.transactionHash, block: Number(l.blockNumber || 0),
+    });
+  } else if (name === 'PoolGraduated') {
+    if (!a.token) return;
+    handlers.onGraduate?.({ chain, address: a.token, tx: l.transactionHash, block: Number(l.blockNumber || 0), ts: Date.now() });
+  } else if (name === 'LaunchSwept') {
+    if (!a.token) return;
+    handlers.onSweep?.({ chain, address: a.token, tx: l.transactionHash, block: Number(l.blockNumber || 0) });
+  }
+}
+
+function routePonsCurve(chain, lp, l, handlers) {
+  const a = l.args || {};
+  const emitter = (l.address || '').toLowerCase();
+  const token = ponsCurveMap.get(`${chain}:${emitter}`);
+  if (!token) return; // 未跟踪的 curve（其 TokenLaunched 未见/未回灌）→ 丢弃
+  const isBuy = l.eventName === 'CurveBuy';
+  // 买家取 recipient（wallet 是 Router，非真实买家，见 docs）。卖单也用 recipient(收到报价币的人)。
+  const account = a.recipient || null;
+  const quoteRaw = isBuy ? a.quoteIn : a.quoteOut;
+  const tokenRaw = isBuy ? a.tokensOut : a.tokensIn; // meme 固定 18 位
+  if (quoteRaw == null || tokenRaw == null || tokenRaw === 0n) return;
+  // 单价(报价币最小单位 / 每个人类可读 meme)：= quoteRaw * 10^18 / tokenRaw，与 momentum.lastPriceWei 口径一致。
+  const price = (quoteRaw * (10n ** 18n)) / tokenRaw;
+  handlers.onTrade?.({
+    chain, address: token, account, launchpad: lp.id, label: lp.label,
+    price, amount: tokenRaw, cost: quoteRaw, offers: null, funds: null,
+    isBuy, ts: Date.now(),
+  });
 }
 
 /**

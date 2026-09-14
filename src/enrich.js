@@ -10,6 +10,7 @@ import { lookupDynamicQuote, dynamicQuoteUsd, learnQuote } from './quotePrice.js
 
 const log = child('enrich');
 const bnbUsdCache = new Map(); // chain -> price
+const nativeUsdCache = new Map(); // chain -> 原生资产美元价(Robinhood ETH 等)；M1 空→用 cfg.nativeUsdFallback，M3 接真实池
 
 export async function readToken(chain, address) {
   const client = httpClient(chain);
@@ -98,6 +99,10 @@ export function resolveQuote(cfg, symOrAddr) {
   if (!symOrAddr) return null;
   const s = String(symOrAddr).toLowerCase();
   if (/^0x0+$/.test(s)) {
+    // 原生资产计价：优先取 config 里标 native 且地址为 0x0 的报价币(Robinhood 的 ETH)；
+    // 否则回落 WBNB(BSC 的 Four.meme BNB 曲线用 0x0 表示 BNB，映射到 WBNB 定价，18 位)。
+    const nativeEntry = Object.entries(cfg.quoteTokens).find(([, q]) => q.native && /^0x0+$/.test(q.address));
+    if (nativeEntry) return { sym: nativeEntry[0], address: nativeEntry[1].address, decimals: nativeEntry[1].decimals };
     const w = cfg.quoteTokens.WBNB;
     return w ? { sym: 'WBNB', address: w.address, decimals: w.decimals } : null;
   }
@@ -114,6 +119,8 @@ export function resolveQuote(cfg, symOrAddr) {
 function quoteUsdPrice(chain, cfg, sym) {
   if (sym === 'USDT' || sym === 'USDC' || sym === 'BUSD' || sym === 'USD1') return 1;
   if (sym === 'WBNB') return bnbUsdCache.get(chain) || cfg.wbnbUsdPriceFallback || 900;
+  // Robinhood 原生 ETH 计价：M1 用 fallback 常量(nativeUsdFallback)，M3 接真实 ETH/USD 池刷新缓存。
+  if (sym === 'ETH') return nativeUsdCache.get(chain) || cfg.nativeUsdFallback || 4500;
   // 动态报价币（SPCXB 等）：查缓存美元价；不可信/未定价 → null，调用方按「无可信价格」处理，不再瞎套 fallback。
   return dynamicQuoteUsd(cfg.chainId, sym);
 }
@@ -147,6 +154,27 @@ export async function refreshBnbUsd(chain) {
 export function getBnbUsd(chain) {
   const cfg = chainConfig(chain);
   return bnbUsdCache.get(chain) || cfg.wbnbUsdPriceFallback || 900;
+}
+
+// Pons(curve-per-token) 曲线募集额：原生 ETH 计价读 curve 的 ETH 余额；ERC-20 计价读 balanceOf。
+// 实测：原生曲线 curve 余额 == 累计(quoteIn−quoteOut)，是权威且自愈的募集额来源（毕业后归零）。
+// 返回 { fundsRaw:bigint, fundsQuote:number(人类可读报价币) }；失败返回 null。
+export async function readCurveFunds(chain, curve, quoteAddr, quoteDec = 18) {
+  if (!curve) return null;
+  const client = httpClient(chain);
+  try {
+    let raw;
+    if (!quoteAddr || /^0x0+$/.test(String(quoteAddr))) {
+      raw = await client.getBalance({ address: curve });
+    } else {
+      raw = await client.readContract({ address: quoteAddr, abi: erc20Abi, functionName: 'balanceOf', args: [curve] });
+    }
+    return { fundsRaw: raw, fundsQuote: Number(formatUnits(raw, quoteDec)) };
+  } catch (e) {
+    recordRpcError();
+    log.debug({ chain, curve, err: e.message }, 'readCurveFunds 失败');
+    return null;
+  }
 }
 
 // 报价币 -> 美元单价（供成交额换算），稳定币=1，WBNB=现价。

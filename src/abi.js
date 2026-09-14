@@ -61,3 +61,20 @@ export const v3FactoryAbi = parseAbi([
 export const tokenManagerAbi = parseAbi([
   'function _tokenInfos(address) view returns (address base, address quote, uint256 template, uint256 totalSupply, uint256 maxOffers, uint256 maxRaising, uint256 launchTime, uint256 offers, uint256 funds, uint256 lastPrice, uint256 K, uint256 T, uint256 status)',
 ]);
+
+// ── Robinhood / Pons V2（curve-per-token）事件（topic0 已离线 keccak + 真实回执双核验，见 docs/robinhood-pons.md）──
+// 工厂发出：登记 curve↔token、毕业、清算中。
+export const ponsFactoryEvents = parseAbi([
+  'event TokenLaunched(address indexed token, address indexed curve, address indexed deployer, address pairToken, uint256 launchConfigId, uint256 graduationThreshold)',
+  'event PoolGraduated(address indexed token, uint256 raisedQuote, uint256 mintedToken, uint256 finalQuote)',
+  'event LaunchSwept(address indexed token, uint256 a, uint256 b)',
+]);
+// 曲线发出（emitter = 每币独立 curve 合约）：⚠️ 买家是 recipient 不是 wallet(=Router)。
+export const ponsCurveEvents = parseAbi([
+  'event CurveBuy(address indexed wallet, address indexed recipient, uint256 quoteIn, uint256 tokensOut, uint256 fee, uint256 tax)',
+  'event CurveSell(address indexed wallet, address indexed recipient, uint256 tokensIn, uint256 quoteOut, uint256 fee, uint256 tax)',
+]);
+// Hook 发出：poolId↔token 映射主源（M2b v4 定价用）。
+export const ponsHookEvents = parseAbi([
+  'event PoolRegistered(bytes32 indexed poolId, address memecoin, address quoteToken, address creator)',
+]);

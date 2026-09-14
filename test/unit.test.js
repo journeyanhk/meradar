@@ -499,3 +499,58 @@ test('taxBps 有税代币桩：合约按买后储备返回 theoSell，10%卖税�
   // 无税代币正滑点：买后储备更深，gotSell 可能 ≥ theoSell → 钳 0，不误报
   assert.equal(taxBps(1_000_000n, 1_005_000n), 0, '正滑点 → 0');
 });
+
+// —— Robinhood / Pons(curve-per-token)：事件签名 + 解码 + 定价口径（M0 冻结 fixture 驱动）——
+import { ponsFactoryEvents, ponsCurveEvents, ponsHookEvents } from '../src/abi.js';
+import { decodeEventLog } from 'viem';
+
+const _rh = JSON.parse(
+  readFileSync(fileURLToPath(new URL('./fixtures/robinhood.json', import.meta.url)), 'utf8'),
+);
+
+test('Pons 事件签名 topic0 与链上冻结值精确一致（错一位类型即 selector 变，viem events 会静默丢弃）', () => {
+  const all = [...ponsFactoryEvents, ...ponsCurveEvents, ...ponsHookEvents];
+  const byName = Object.fromEntries(all.map((e) => [e.name, e]));
+  for (const name of ['TokenLaunched', 'PoolGraduated', 'LaunchSwept', 'CurveBuy', 'CurveSell', 'PoolRegistered']) {
+    assert.ok(byName[name], `缺少事件 ${name}`);
+    assert.equal(toEventSelector(byName[name]), _rh.topics[name], `${name} topic0 与 fixture 不一致`);
+  }
+});
+
+test('Pons TokenLaunched fixture 解码：pairToken=0x0 表示原生 ETH 计价，阈值 4.2 ETH', () => {
+  const la = _rh.launchTx.events.find((e) => e.event === 'TokenLaunched').args;
+  assert.match(la.pairToken, /^0x0+$/, 'pairToken 为零地址 → 原生 ETH 计价');
+  assert.equal(la.graduationThreshold, '4200000000000000000', '标准 meme 毕业阈值 4.2 ETH');
+  assert.notEqual(la.curve.toLowerCase(), la.token.toLowerCase(), 'curve 与 token 不同');
+});
+
+test('Pons CurveBuy fixture：买家是 recipient(非 wallet=Router)，单价=quoteIn·1e18/tokensOut', () => {
+  const b = _rh.launchTx.events.find((e) => e.event === 'CurveBuy').args;
+  // wallet 是 Pons Router；真实买家/接收人是 recipient
+  assert.equal(b.wallet.toLowerCase(), '0xe33e9e479df8802cb0866d5d05258bec4cf62948', 'wallet=Router');
+  assert.notEqual(b.recipient.toLowerCase(), b.wallet.toLowerCase(), 'recipient≠wallet');
+  const quoteIn = BigInt(b.quoteIn), tokensOut = BigInt(b.tokensOut);
+  const price = (quoteIn * (10n ** 18n)) / tokensOut; // discover.routePonsCurve 同一口径
+  // priceUsd = price/1e18 * ethUsd；用假定 ethUsd=4500 断言量级合理（fresh launch 早期市值几千美元级）
+  const priceUsd = (Number(price) / 1e18) * 4500;
+  const mcapUsd = priceUsd * 1e9; // Pons 固定 10 亿供应
+  assert.ok(mcapUsd > 1000 && mcapUsd < 1_000_000, `首笔买入市值应在千~百万美元级，实得 ${Math.round(mcapUsd)}`);
+});
+
+test('Pons PoolRegistered fixture：hook 发出，quoteToken=0x0(原生 ETH)，poolId 为 bytes32', () => {
+  const p = _rh.graduationTx.events.find((e) => e.event === 'PoolRegistered').args;
+  assert.match(p.quoteToken, /^0x0+$/, '原生 ETH 计价池');
+  assert.equal(p.poolId.length, 66, 'poolId 是 32 字节(0x+64hex)');
+  assert.ok(p.memecoin && /^0x[0-9a-fA-F]{40}$/.test(p.memecoin), 'memecoin 是地址');
+});
+
+test('Pons 事件按冻结原始 topics/data 可被 viem 解码（防 ABI 漂移）', () => {
+  // 用 fixture 的 poolId 重建 PoolRegistered 的 topics/data，确保 indexed 划分正确。
+  const src = _rh.graduationTx.events.find((e) => e.event === 'PoolRegistered');
+  const ev = ponsHookEvents.find((e) => e.name === 'PoolRegistered');
+  const pad = (a) => '0x' + '0'.repeat(24) + a.slice(2).toLowerCase();
+  const data = '0x' + [src.args.memecoin, src.args.quoteToken, src.args.creator].map((a) => pad(a).slice(2)).join('');
+  const dec = decodeEventLog({ abi: [ev], topics: [_rh.topics.PoolRegistered, src.args.poolId], data });
+  assert.equal(dec.args.memecoin.toLowerCase(), src.args.memecoin.toLowerCase());
+  assert.equal(dec.args.creator.toLowerCase(), src.args.creator.toLowerCase());
+});

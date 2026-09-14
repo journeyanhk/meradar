@@ -1,10 +1,10 @@
-import { watchChain, resubscribeSwaps } from './discover.js';
+import { watchChain, resubscribeSwaps, registerPonsCurve, seedPonsCurves, ponsTokenOf } from './discover.js';
 import { readToken, quoteUsd, resolveQuote, readTokenInfo } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { store } from './db.js';
 import { config, chainConfig } from './config.js';
 import { httpClient } from './chain.js';
-import { fourMemeEvents } from './abi.js';
+import { fourMemeEvents, ponsFactoryEvents, ponsCurveEvents } from './abi.js';
 import { bus, Events } from './bus.js';
 import { startTracker } from './track.js';
 import { discoverPool } from './pool.js';
@@ -67,8 +67,15 @@ async function onCreate(c) {
   });
   if (!inserted) return;
   recordSeen();
-  // 抽样 1/10 累计码哈希频次（TokenCreate=平台部署证据）；仅一次 getCode，httpClient 已开 batch。
-  if (createSeq++ % 10 === 0) {
+  // Pons(curve-per-token)：登记曲线合约 + 报价币/毕业阈值。quote=0x0→ETH；否则 ERC-20 计价。
+  // TokenLaunched 不带 name/symbol/totalSupply，留待 promote 时 readToken 补齐（懒读，只对通过准入的币）。
+  if (c.curve) {
+    store.setCurve(key, c.curve);
+    const q = resolveQuote(chainConfig(c.chain), c.quote);
+    store.setCurveInfo(key, { quote_symbol: q?.sym ?? null, max_raising: c.graduationThreshold ?? null, launch_time: null });
+  }
+  // 抽样 1/10 累计码哈希频次（TokenCreate=平台部署证据，仅 Four.meme）；仅一次 getCode，httpClient 已开 batch。
+  if (c.launchpad === 'fourmeme' && createSeq++ % 10 === 0) {
     await learnTemplate(c.chain, c.address).catch((e) => log.debug({ err: e.message }, 'learnTemplate'));
   }
   log.debug({ chain: c.chain, symbol: c.symbol }, '登记新币(seen)');
@@ -212,6 +219,24 @@ async function onSwap(sw) {
 
 // promote 时反查池子（逻辑已抽到 src/pool.js，engine 与 track 共用）
 
+// Pons 毕业(PoolGraduated)：v4 池地址/定价待 M2b；M1 先记毕业时刻(供新鲜度 + 前端「已毕业」态)。
+// 毕业后 curve 余额归零、曲线成交停发，价格会冻结在毕业瞬间，直到 M2b 接上 v4 定价。
+async function onGraduate(g) {
+  const key = `${g.chain}:${g.address.toLowerCase()}`;
+  if (!store.get(key)) return;
+  store.markGraduated(key, g.ts || Date.now());
+  bus.emit(Events.POOLS_CHANGED, { chain: g.chain }); // M2b 将据此重建 v4 定向订阅
+  bus.emit(Events.UPDATE, { ...store.get(key) });
+  log.info({ chain: g.chain, token: g.address }, 'Pons 毕业(PoolGraduated)：已记毕业时刻，v4 定价待 M2b');
+}
+
+// Pons 清算中(LaunchSwept)：毕业前的过渡态；M1 仅记录，前端「毕业中」态与 v4 建池由 M2b 补。
+async function onSweep(s) {
+  const key = `${s.chain}:${s.address.toLowerCase()}`;
+  if (!store.get(key)) return;
+  log.debug({ chain: s.chain, token: s.address }, 'Pons LaunchSwept(清算中)');
+}
+
 // AMM 建池 / 毕业：补池子地址与类型，供 track 定价，并重建成交订阅。
 async function onAmm(c) {
   const key = `${c.chain}:${c.address.toLowerCase()}`;
@@ -250,9 +275,22 @@ function rebuildSwaps(chain) {
   setSwapPools(store.swapPools().filter((r) => r.pool).length);
 }
 
+// 启动回填：按链上启用的发射台类型分派（Four.meme 事件流 / Pons 曲线）。
+export async function backfillRecentCreates(chain, hours = 2) {
+  const cfg = chainConfig(chain);
+  let count = 0;
+  if (cfg.launchpads?.some((l) => l.type === 'curve-per-token' && l.factory && !/^0x0+$/.test(l.factory))) {
+    count += await backfillPonsLaunches(chain, hours).catch((e) => { log.warn({ chain, err: e.message }, 'Pons 回填失败(忽略)'); return 0; });
+  }
+  if (cfg.launchpads?.some((l) => l.type === 'fourmeme-events' && l.address && !/^0x0+$/.test(l.address))) {
+    count += await backfillFourMeme(chain, hours).catch((e) => { log.warn({ chain, err: e.message }, 'Four.meme 回填失败(忽略)'); return 0; });
+  }
+  return count;
+}
+
 // 启动回填：拉取最近 ~hours 小时的 TokenCreate 登记为 seen，
 // 让服务启动前创建、之后才启动的慢热币也能进入跟踪。（publicnode 支持带地址的 getLogs）
-export async function backfillRecentCreates(chain, hours = 2) {
+async function backfillFourMeme(chain, hours = 2) {
   const cfg = chainConfig(chain);
   const lp = cfg.launchpads?.find(
     (l) => l.type === 'fourmeme-events' && l.address && !/^0x0+$/.test(l.address),
@@ -310,11 +348,84 @@ export async function backfillRecentCreates(chain, hours = 2) {
   return count;
 }
 
+// Pons(curve-per-token) 启动回填：两遍扫描最近 ~hours 小时。
+//  ① TokenLaunched(工厂,单事件) → 登记 curve↔token 映射 + onCreate(seen)，使实时曲线成交能反查归属。
+//  ② CurveBuy/CurveSell(topic0 全量,无地址) → 喂动量买家(块高估算 ts)，让启动前已热的币首笔实时买入即可升级。
+// getLogs 一律用 event/events 参数(viem 自动算 topic0)，绝不用原始 topics(会被静默忽略,返回全量,见 docs)。
+async function backfillPonsLaunches(chain, hours = 2) {
+  const cfg = chainConfig(chain);
+  const lp = cfg.launchpads?.find((l) => l.type === 'curve-per-token' && l.factory && !/^0x0+$/.test(l.factory));
+  if (!lp) return 0;
+  const client = httpClient(chain);
+  let latest;
+  try { latest = await client.getBlockNumber(); } catch (e) { log.warn({ chain, err: e.message }, 'Pons 回填取块高失败'); return 0; }
+  const SEC_PER_BLOCK = 2; // Robinhood 出块间隔保守估算（仅用于窗口跨度与 ts 估算）
+  const span = BigInt(Math.round((3600 * hours) / SEC_PER_BLOCK));
+  const chunk = 1400n; // 官方 HTTP 段上限 + 429 规避
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const tokenLaunched = ponsFactoryEvents.find((e) => e.name === 'TokenLaunched');
+  const nowMs = Date.now();
+  let from = latest > span ? latest - span : 0n;
+  let launches = 0;
+  while (from <= latest) {
+    const to = from + chunk - 1n > latest ? latest : from + chunk - 1n;
+    // ① TokenLaunched
+    let llogs = null;
+    for (let a = 0; a < 3 && llogs === null; a++) {
+      try { llogs = await client.getLogs({ address: lp.factory, event: tokenLaunched, fromBlock: from, toBlock: to }); }
+      catch (e) { if (a === 2) log.debug({ chain, err: e.message }, 'Pons 回填 TokenLaunched 分段失败'); else await sleep(600 * (a + 1)); }
+    }
+    for (const l of llogs || []) {
+      const ar = l.args || {};
+      if (!ar.token || !ar.curve) continue;
+      registerPonsCurve(chain, ar.curve, ar.token);
+      await onCreate({
+        chain, address: ar.token, launchpad: lp.id, label: lp.label,
+        creator: ar.deployer || null, name: null, symbol: null, totalSupply: null, launchTime: null,
+        curve: ar.curve, quote: ar.pairToken,
+        graduationThreshold: ar.graduationThreshold != null ? ar.graduationThreshold.toString() : null,
+        tx: l.transactionHash, block: Number(l.blockNumber || 0),
+      }).catch(() => {});
+      launches++;
+    }
+    await sleep(400);
+    // ② CurveBuy/CurveSell（topic0 全量）
+    let tlogs = null;
+    for (let a = 0; a < 3 && tlogs === null; a++) {
+      try { tlogs = await client.getLogs({ events: ponsCurveEvents, fromBlock: from, toBlock: to }); }
+      catch (e) { if (a === 2) log.debug({ chain, err: e.message }, 'Pons 回填曲线成交分段失败'); else await sleep(600 * (a + 1)); }
+    }
+    for (const l of tlogs || []) {
+      const token = ponsTokenOf(chain, l.address);
+      if (!token) continue; // 未登记的 curve（其 launch 在窗口外）→ 跳过
+      const ar = l.args || {};
+      const isBuy = l.eventName === 'CurveBuy';
+      const quoteRaw = isBuy ? ar.quoteIn : ar.quoteOut;
+      const tokenRaw = isBuy ? ar.tokensOut : ar.tokensIn;
+      if (quoteRaw == null || tokenRaw == null || tokenRaw === 0n) continue;
+      const bn = l.blockNumber != null ? BigInt(l.blockNumber) : latest;
+      const ts = nowMs - Number(latest - bn) * SEC_PER_BLOCK * 1000;
+      momentum.onTrade({
+        token, account: isBuy ? (ar.recipient || null) : null,
+        price: (quoteRaw * (10n ** 18n)) / tokenRaw, cost: quoteRaw, funds: null, offers: null,
+        isBuy, ts,
+      });
+    }
+    from = to + 1n;
+    await sleep(400);
+  }
+  log.info({ chain, launches, hours }, 'Pons 启动回填完成');
+  return launches;
+}
+
 export function startEngine() {
   // 毕业池集合变化（新毕业 / 归档）时重建单条 Swap 订阅
   bus.on(Events.POOLS_CHANGED, ({ chain }) => {
     try { rebuildSwaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildSwaps'); }
   });
+
+  // Pons：从 DB 回灌 curve↔token 映射（重启后实时曲线成交才能按 emitter 反查归属）。
+  try { seedPonsCurves(store.curveTokens()); } catch (e) { log.debug({ err: e.message }, 'seedPonsCurves'); }
 
   for (const chain of config.enabledChains) {
     try {
@@ -322,6 +433,9 @@ export function startEngine() {
         onCreate: (c) => onCreate(c).catch((e) => log.debug({ err: e.message }, 'onCreate')),
         onTrade: (t) => onTrade(t).catch((e) => log.debug({ err: e.message }, 'onTrade')),
         onAmm: (c) => onAmm(c).catch((e) => log.debug({ err: e.message }, 'onAmm')),
+        onGraduate: (g) => onGraduate(g).catch((e) => log.debug({ err: e.message }, 'onGraduate')),
+        onSweep: (s) => onSweep(s).catch((e) => log.debug({ err: e.message }, 'onSweep')),
+        onPoolRegistered: (p) => { log.debug({ chain: p.chain, token: p.token, poolId: p.poolId }, 'Pons PoolRegistered(poolId↔token，M2b v4 定价用)'); },
       });
       // 启动时按库中已有的毕业池建一次订阅（覆盖重启前已毕业的活跃币）
       try { rebuildSwaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildSwaps(启动)'); }

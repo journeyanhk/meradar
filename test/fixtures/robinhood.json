@@ -1,0 +1,78 @@
+{
+  "_note": "M0 冻结的 Robinhood/Pons 链上事件样本，供单测断言解码正确性。勿手改，重生成用 scripts。",
+  "chainId": 4663,
+  "graduationTx": {
+    "hash": "0x76cf7df788b8f979aab89274ca33bea3f2992b87d081f09e85e39e22e9739cb9",
+    "events": [
+      {
+        "event": "PoolRegistered",
+        "emitter": "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044",
+        "block": 62426801,
+        "tx": "0x76cf7df788b8f979aab89274ca33bea3f2992b87d081f09e85e39e22e9739cb9",
+        "args": {
+          "poolId": "0x20a88a40b7904a101f12d2d03b0438a95f8c4d2f87c0af40bedcf7674bae6cc7",
+          "memecoin": "0x35B5611B773fEbBeA5CfAC119bCAdA8130d02562",
+          "quoteToken": "0x0000000000000000000000000000000000000000",
+          "creator": "0xeba02D94152b843B01E92C4364463422485df793"
+        }
+      },
+      {
+        "event": "PoolGraduated",
+        "emitter": "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+        "block": 62426801,
+        "tx": "0x76cf7df788b8f979aab89274ca33bea3f2992b87d081f09e85e39e22e9739cb9",
+        "args": {
+          "token": "0x35B5611B773fEbBeA5CfAC119bCAdA8130d02562",
+          "a": "2669708",
+          "b": "204081632653061225780924614",
+          "c": "4200000000000000093"
+        }
+      }
+    ]
+  },
+  "launchTx": {
+    "hash": "0x62a36b03d5dcfdc2c1dc69bab050749904c7cfd1cc1ea208a486ddba3fb5f6d4",
+    "events": [
+      {
+        "event": "TokenLaunched",
+        "emitter": "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+        "block": 62438688,
+        "tx": "0x62a36b03d5dcfdc2c1dc69bab050749904c7cfd1cc1ea208a486ddba3fb5f6d4",
+        "args": {
+          "token": "0x4d7a45D516BF797d0721135F1FAe3D1D0b0a4f04",
+          "curve": "0xc6e30E3af487ff0f9cf987bDD6700aDAdB619fA2",
+          "deployer": "0xA3d0308a2BC2c27829AE0C1A1532d805C417B770",
+          "pairToken": "0x0000000000000000000000000000000000000000",
+          "launchConfigId": "0",
+          "graduationThreshold": "4200000000000000000"
+        }
+      },
+      {
+        "event": "CurveBuy",
+        "emitter": "0xc6e30e3af487ff0f9cf987bdd6700adadb619fa2",
+        "block": 62438688,
+        "tx": "0x62a36b03d5dcfdc2c1dc69bab050749904c7cfd1cc1ea208a486ddba3fb5f6d4",
+        "args": {
+          "wallet": "0xe33E9E479dF8802cb0866d5d05258bEc4cF62948",
+          "recipient": "0xA3d0308a2BC2c27829AE0C1A1532d805C417B770",
+          "quoteIn": "71428571428571429",
+          "tokensOut": "40000000000000000548571428",
+          "fee": "714285714285714",
+          "tax": "714285714285714"
+        }
+      }
+    ]
+  },
+  "topics": {
+    "TokenLaunched": "0x8d4aad4953d0ca700d468f3753aa14432d1b35b43ec6409f051fb6aa43a89607",
+    "CurveBuy": "0xec36bf571f136799e8dc0b0b8bea4b04d8bd3d43de838aab0d5fc21d4cbfc455",
+    "CurveSell": "0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df",
+    "LaunchSwept": "0xcdb72f157fd3666758a6ce201387ffb52038c7562e4fff352828da1096c4b6b4",
+    "PoolGraduated": "0x0a44ef75df69c534f43cd6c1aa3ef8983065fe5fe79ef9e79f6494e6f258c259",
+    "PoolRegistered": "0x01bf263a1db1652580721573296e1a1fa70b3d4c87f61d02a69c4e1109d2d573",
+    "SnipeTaxCharged": "0x3bc39a5562b28f5fe8f36cecabfbaa12bb969acf05717994709225fc412a9934",
+    "HookFeeCollected": "0xc532c43b3423e14ef72748f1c8291238829ca0af8ba9b67975ad1483485a4b4d",
+    "v4Initialize": "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438",
+    "v4Swap": "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f"
+  }
+}

@@ -1,4 +1,4 @@
-import { readPoolMetrics, resolveQuote, quoteUsd } from './enrich.js';
+import { readPoolMetrics, resolveQuote, quoteUsd, readCurveFunds } from './enrich.js';
 import { scoreCandidate, evaluateTradeSafety } from './score.js';
 import { discoverPool, graduatedByCurve } from './pool.js';
 import { narrativeHit, copycatCount } from './narrative.js';
@@ -30,6 +30,16 @@ export async function pollCandidate(chain, cand) {
 
   // 曲线期指标来自内存事件流（零 RPC）；毕业后用池子真实储备
   const curve = momentum.curveMetrics(token, supplyHuman(cand), quotePriceUsd, quoteDec);
+
+  // Pons(curve-per-token) 募集额：曲线事件不带 funds，改读 curve 合约余额（原生 ETH=getBalance，
+  // ERC-20 计价=balanceOf）。实测 curve 余额 == 累计净买入，是权威且自愈的募集额，覆盖进内存指标。
+  if (curve && cand.curve && !cand.pool) {
+    const cf = await readCurveFunds(chain, cand.curve, q?.address, quoteDec).catch(() => null);
+    if (cf) {
+      curve.fundsQuote = cf.fundsQuote;
+      curve.fundsUsd = quotePriceUsd != null ? cf.fundsQuote * quotePriceUsd : 0;
+    }
+  }
 
   // 毕业检测（状态驱动，每轮自愈）：Token Manager 毕业后不再发买卖事件，momentum 价格会冻结在毕业瞬间。
   // 池子若靠 PairCreated 一次性事件补——事件丢失/交易对被提前建/重启窗口——就永远接不上，卡片冻结在毕业价。
