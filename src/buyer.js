@@ -27,7 +27,7 @@ export const BUYER_TAGS = ['sniper', 'bot', 'farm', 'dust', 'fresh', 'flipper'];
  * @param ctx  {{ launchMs, isFarm, nonce, now, cfg }}
  * @returns string[] 标签(可能为空=natural)
  */
-export function classifyAccount(acct, { launchMs = null, isFarm = false, nonce = null, cfg = BUYER_DEFAULTS } = {}) {
+export function classifyAccount(acct, { launchMs = null, isFarm = false, nonce = null, priced = true, cfg = BUYER_DEFAULTS } = {}) {
   const tags = [];
   const buys = acct.buys || [];
   if (!buys.length) return tags; // 只卖不买的地址不参与买家分级
@@ -47,8 +47,9 @@ export function classifyAccount(acct, { launchMs = null, isFarm = false, nonce =
   // farm：调用方跨币统计给出(24h ≥N 个不同新币)。
   if (isFarm) tags.push('farm');
 
-  // dust：该币累计买入额过小。
-  if (buyUsd < cfg.dustUsd) tags.push('dust');
+  // dust：该币累计买入额过小。仅在报价币已定价(priced)时判——未定价时 quote_amount 恒 0，
+  // 会把全体买家误标粉尘、自然买家归零，故此时跳过(调用方在 softFlags 标 unpriced)。
+  if (priced && buyUsd < cfg.dustUsd) tags.push('dust');
 
   // fresh：新钱包(nonce ≤ freshNonceMax)。nonce 未查(null)则不判。
   if (nonce != null && nonce <= cfg.freshNonceMax) tags.push('fresh');
@@ -88,7 +89,7 @@ function isBot(buys, cfg) {
  * @param opts   {{ launchMs, farmSet:Set<string>, nonceByAccount:Map<string,number>, now, cfg }}
  * @returns {{ tagsByAccount: Map<string,string[]>, ratios, naturalBuyers, naturalBuyers30m, buyerCount }}
  */
-export function classifyTokenBuyers(trades, { launchMs = null, farmSet = new Set(), nonceByAccount = new Map(), now = Date.now(), cfg = BUYER_DEFAULTS } = {}) {
+export function classifyTokenBuyers(trades, { launchMs = null, farmSet = new Set(), nonceByAccount = new Map(), priced = true, now = Date.now(), cfg = BUYER_DEFAULTS } = {}) {
   const byAcct = new Map(); // account -> { buys, sells }
   for (const t of trades || []) {
     const acc = (t.account || '').toLowerCase();
@@ -111,7 +112,7 @@ export function classifyTokenBuyers(trades, { launchMs = null, farmSet = new Set
     if (!e.buys.length) continue; // 只卖不买 → 不是买家
     e.buys.sort((a, b) => a.ts - b.ts);
     buyerCount++;
-    const tags = classifyAccount(e, { launchMs, isFarm: farmSet.has(acc), nonce: nonceByAccount.has(acc) ? nonceByAccount.get(acc) : null, cfg });
+    const tags = classifyAccount(e, { launchMs, isFarm: farmSet.has(acc), nonce: nonceByAccount.has(acc) ? nonceByAccount.get(acc) : null, priced, cfg });
     if (tags.length) tagsByAccount.set(acc, tags);
     for (const t of tags) counts[t] = (counts[t] || 0) + 1;
     const isNatural = tags.length === 0;

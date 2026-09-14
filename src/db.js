@@ -309,7 +309,7 @@ const stmt = {
   allV4Pools: db.prepare(`SELECT * FROM v4_pools`),
   v4PoolsByChain: db.prepare(`SELECT * FROM v4_pools WHERE chain=?`),
   // M2c 买家分级
-  tradesForKey: db.prepare(`SELECT ts, side, account, quote_amount, token_amount, tax_raw, block FROM trades WHERE key=? AND account IS NOT NULL ORDER BY ts ASC`),
+  tradesForKey: db.prepare(`SELECT ts, side, account, quote_amount, token_amount, tax_raw, block FROM trades WHERE key=@key AND account IS NOT NULL AND ts >= @since ORDER BY ts ASC`),
   // farm/tokens_24h：某链 24h 窗口内每个地址买过多少个不同新币。一次分组扫描，track 侧缓存 60s，
   // 既得 farm 集(≥N)又得每地址 tokens_bought_24h。key LIKE 'chain:%' 过滤链；first_ts>=since 限窗。
   buyerTokenCounts24h: db.prepare(`SELECT account, COUNT(DISTINCT key) AS n FROM buyers WHERE key LIKE @prefix AND first_ts >= @since GROUP BY account`),
@@ -406,7 +406,7 @@ export const store = {
     return changes;
   },
   // M2c 买家分级：读该币全部有主成交、farm 地址集、写回自然买家/软标记、沉淀画像。
-  tradesForKey(key) { return stmt.tradesForKey.all(key); },
+  tradesForKey(key, sinceMs = 0) { return stmt.tradesForKey.all({ key, since: sinceMs }); },
   buyerTokenCounts24h(chain, sinceMs) {
     const m = new Map();
     for (const r of stmt.buyerTokenCounts24h.all({ prefix: `${chain}:%`, since: sinceMs })) m.set(r.account, r.n);

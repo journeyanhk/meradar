@@ -13,6 +13,27 @@ import { BUYER_TAGS } from './buyer.js';
 
 const log = child('server');
 
+// farm/tokens_24h 分布：一周后按 99 分位定阈值前，先把每地址 24h 买过的不同新币数分位输出到 /api/health。
+// 60s 缓存(每链一次 buyers 表分组扫)，避免 health 被频繁调用时反复全扫。
+let farmDistCache = { at: 0, data: null };
+function farmDistribution() {
+  if (farmDistCache.data && Date.now() - farmDistCache.at < 60_000) return farmDistCache.data;
+  const since = Date.now() - 24 * 3600 * 1000;
+  const threshold = config.buyerGrading?.farmMinTokens24h ?? 8;
+  const out = {};
+  for (const chain of config.enabledChains) {
+    const counts = [...store.buyerTokenCounts24h(chain, since).values()].sort((a, b) => a - b);
+    const n = counts.length;
+    const q = (p) => (n ? counts[Math.min(n - 1, Math.floor(p * n))] : 0);
+    out[chain] = {
+      accounts: n, p50: q(0.5), p90: q(0.9), p99: q(0.99), max: n ? counts[n - 1] : 0,
+      threshold, farmHits: counts.filter((c) => c >= threshold).length,
+    };
+  }
+  farmDistCache = { at: Date.now(), data: out };
+  return out;
+}
+
 // 软标记落库只存计数(buyerCount + 各标签数)；占比在此现算，避免同一份分布存两遍。
 function softFlagsFrom(json) {
   let f = null;
@@ -60,6 +81,7 @@ export async function startServer() {
     runtime: healthSnapshot(),
     rpcCapabilities: rpcCapabilities(),
     template: templateHealth(), // { promoted24h, templateUnknownRate, learned } —— 未知率>5% 提示模板轮换
+    buyerGrading: farmDistribution(), // 每链 tokens_bought_24h 分位(50/90/99/max) + farm 命中数，供一周后定阈值
     time: Date.now(),
   }));
 

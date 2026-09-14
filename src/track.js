@@ -26,6 +26,16 @@ function buyerCounts24h(chain) {
   return counts;
 }
 
+// 买家分级结果 5min 缓存：最后成交时刻(lastTradeTs)与 priced 状态都没变即复用上轮结果，
+// 跳过全量 tradesForKey + 分级 + 画像写库(长寿活跃币每轮全量拉取会放大 SQLite 读)。
+// naturalBuyers30m 是 30min 滚动窗，复用最多带 ≤5min 陈旧，可接受。
+const clsCache = new Map(); // key -> { at, lastTs, priced, softFlags, naturalBuyers30m }
+function pruneClsCache() {
+  if (clsCache.size <= 1000) return;
+  const cutoff = Date.now() - 10 * 60_000;
+  for (const [k, v] of clsCache) if (v.at < cutoff) clsCache.delete(k);
+}
+
 // nonce(fresh 钱包)：只对金额前 topN、且从未查过(nonce_checked_at=null)的买家查一次，落 buyer_profiles。
 // 成本上限：每候选每轮 ≤topN 次 eth_getTransactionCount(viem batch 合并)，查过即不再查。
 // profiles = 本轮已批量取好的画像 Map，避免逐地址点查；返回本轮新查到 nonce 的地址集。
@@ -136,8 +146,14 @@ export async function pollCandidate(chain, cand) {
   // 取该币全部有主成交 → 分级(sniper/bot/farm/dust/fresh/flipper) → 自然买家/软标记并行落库(不改阈值输入)。
   // 软标记只存计数(buyerCount + 各标签数)，占比在 API 层现算，避免同一份分布存两遍。
   let softFlags = null, naturalBuyers30m = flow.newBuyers30m;
-  try {
-    const trades = store.tradesForKey(cand.key);
+  const priced = quotePriceUsd != null && quotePriceUsd > 0; // 报价币是否已定价 → dust 守卫
+  const lastTs = store.lastTradeTs(cand.key) || 0;
+  const cachedCls = clsCache.get(cand.key);
+  if (cachedCls && cachedCls.lastTs === lastTs && cachedCls.priced === priced && Date.now() - cachedCls.at < 5 * 60_000) {
+    softFlags = cachedCls.softFlags; naturalBuyers30m = cachedCls.naturalBuyers30m; // 无新成交且定价态未变 → 复用
+  } else {
+   try {
+    const trades = store.tradesForKey(cand.key, Date.now() - DAY); // 只看近 24h(狙击/flipper/粉尘均为早期信号)
     if (trades.length) {
       const counts24h = buyerCounts24h(chain);
       const farmMin = config.buyerGrading?.farmMinTokens24h ?? 15;
@@ -159,9 +175,10 @@ export async function pollCandidate(chain, cand) {
       }
       const nonceByAccount = new Map();
       for (const [acc, p] of profiles) if (p.nonce_checked_at) nonceByAccount.set(acc, p.nonce_at_check);
-      const cls = classifyTokenBuyers(trades, { launchMs: cand.launch_time ?? null, farmSet, nonceByAccount });
+      const cls = classifyTokenBuyers(trades, { launchMs: cand.launch_time ?? null, farmSet, nonceByAccount, priced });
       naturalBuyers30m = cls.naturalBuyers30m;
       softFlags = { buyerCount: cls.buyerCount, naturalBuyers: cls.naturalBuyers, ...cls.counts };
+      if (!priced) softFlags.unpriced = true; // 报价币无价 → 粉尘判定暂停(前端提示)
       // 画像沉淀：给标签有变化的买家写标签 + tokens_bought_24h(供 farm/聪明钱复用)；标签未变则跳过写库。
       for (const [acc, tags] of cls.tagsByAccount) {
         const prevTags = profiles.get(acc)?.tags || '';
@@ -169,7 +186,10 @@ export async function pollCandidate(chain, cand) {
         store.setBuyerTags(chain, acc, tags, counts24h.get(acc) || 0);
       }
     }
-  } catch (e) { log.debug({ err: e.message, key: cand.key }, '买家分级失败(忽略)'); }
+   } catch (e) { log.debug({ err: e.message, key: cand.key }, '买家分级失败(忽略)'); }
+   clsCache.set(cand.key, { at: Date.now(), lastTs, priced, softFlags, naturalBuyers30m });
+   pruneClsCache();
+  }
   // 软标记/自然买家未变则不写库(每候选每轮都会进这里，避免无谓 UPDATE + updated_at 抖动)。
   const softFlagsJson = softFlags ? JSON.stringify(softFlags) : null;
   if ((prev?.natural_buyers_30m ?? 0) !== (naturalBuyers30m | 0) || (prev?.soft_flags ?? null) !== softFlagsJson) {

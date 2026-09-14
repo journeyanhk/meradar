@@ -10,7 +10,7 @@
     "minBuyersToActivate": 5
   },
   "buyerGrading": {
-    "farmMinTokens24h": 15,
+    "farmMinTokens24h": 8,
     "nonceCheck": { "enabled": true, "topN": 30 }
   },
   "score": {

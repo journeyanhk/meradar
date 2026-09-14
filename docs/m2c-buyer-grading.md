@@ -17,8 +17,8 @@
 |---|---|---|---|
 | `sniper` | `tax_raw > 0` **或** 首买距发射 ≤ 60s | trades + `candidates.launch_time` | 全部（BSC/Arc 无税，靠时间窗） |
 | `bot` | 同块 ≥ 3 笔买入，或任意 5min 窗口 ≥ 10 笔 | trades（`block` / `ts`） | 全部 |
-| `farm` | 该地址 24h 内在库里买过 ≥ 15 个不同新币 | `buyers` 表跨币 `COUNT(DISTINCT key)` | 全部 |
-| `dust` | 该币累计买入 < $1 | trades（`quote_amount`） | 全部 |
+| `farm` | 该地址 24h 内在库里买过 ≥ 8 个不同新币 | `buyers` 表跨币 `COUNT(DISTINCT key)` | 全部 |
+| `dust` | 该币累计买入 < $1（**仅报价币已定价时判**） | trades（`quote_amount`）+ `priced` 守卫 | 全部 |
 | `fresh` | nonce ≤ 3 | `eth_getTransactionCount`，仅金额前 30 且未查过的买家 | 全部 |
 | `flipper` | 首买后 10min 内卖出 ≥ 90% 持仓 | trades（buy/sell `token_amount`） | 全部 |
 
@@ -40,8 +40,15 @@
 ## 配置（`config.buyerGrading`）
 
 ```json
-"buyerGrading": { "farmMinTokens24h": 15, "nonceCheck": { "enabled": true, "topN": 30 } }
+"buyerGrading": { "farmMinTokens24h": 8, "nonceCheck": { "enabled": true, "topN": 30 } }
 ```
+
+## M3-0 修复（阻断 bug + 覆盖/性能）
+
+- **`launch_time` 回退**：链上 `launchTime` 有效(`>0`)才用；Four.meme 常为 0（会被存成 1970 年，比 `null` 更隐蔽地让时间窗恒 false）、Pons 为 null → 回填用块号估算（`estimateTsFromBlock`，复用启动测速缓存的 latest，不额外查块），实时用 `Date.now()`。否则时间窗狙击在两条链上静默失效，只剩 Robinhood 狙击税。
+- **`dust` 的 `priced` 守卫**：报价币未定价时 `quote_amount` 恒 0，会把全体买家标粉尘、自然买家归零。`priced = quotePriceUsd != null && > 0`，为 false 时跳过 dust 判定并在 `soft_flags` 标 `unpriced: true`。
+- **`tradesForKey` 只拉近 24h** + 按 `lastTradeTs` 做 5min 结果缓存（成交时刻与 `priced` 态均未变即复用），避免长寿活跃币每轮全量拉取放大 SQLite 读。
+- **`farm` 阈值 15 → 8**（仅标签、不门控）；`/api/health.buyerGrading` 每链输出 `tokens_bought_24h` 分位（50/90/99/max）+ 命中数，一周后按 99 分位定阈值。
 
 ## 验收门（可执行）
 

@@ -674,6 +674,22 @@ test('M2c dust：累计买入 < $1 → dust', () => {
   assert.ok(tags.includes('dust'), '<$1 = dust');
 });
 
+test('M3-0 dust priced 守卫：报价币无价(priced=false)时不判 dust', () => {
+  const buy = { buys: [{ ts: LAUNCH + 20 * 60_000, block: 5, quoteUsd: 0, tokens: 1000 }] };
+  assert.ok(classifyAccount(buy, { launchMs: LAUNCH, priced: true }).includes('dust'), '默认(priced)时 $0 = dust');
+  assert.ok(!classifyAccount(buy, { launchMs: LAUNCH, priced: false }).includes('dust'), 'priced=false 时跳过 dust');
+});
+
+test('M3-0 dust priced 守卫：classifyTokenBuyers(priced=false) 不把全体标粉尘', () => {
+  const trades = [
+    { ts: LAUNCH + 1000, side: 'buy', account: '0xa', quote_amount: 0, token_amount: 100 },
+    { ts: LAUNCH + 2000, side: 'buy', account: '0xb', quote_amount: 0, token_amount: 200 },
+  ];
+  const res = classifyTokenBuyers(trades, { launchMs: null, priced: false, now: LAUNCH + 3000 });
+  assert.equal(res.counts.dust, 0, 'priced=false 时 dust 计数为 0');
+  assert.equal(res.naturalBuyers, 2, '未定价买家仍算自然买家(不被误标)');
+});
+
 test('M2c fresh：nonce ≤3 → fresh；nonce 未知不判', () => {
   const buy = { buys: [{ ts: LAUNCH + 20 * 60_000, block: 5, quoteUsd: 100, tokens: 100 }] };
   assert.ok(classifyAccount(buy, { launchMs: LAUNCH, nonce: 1 }).includes('fresh'), 'nonce 1 = fresh');

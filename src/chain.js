@@ -36,11 +36,15 @@ export function httpClient(chain) {
 // 写死会让回填窗口跨度与历史成交 ts 估算整体偏移（Robinhood 写 2s 实际 0.1s → 时间戳放大 20 倍，
 // 刚回填的币被新鲜度门误判过期）。启动时对每条链实测一次，缓存供回填复用；失败回落 config.secPerBlockFallback。
 const secPerBlockCache = new Map();
+// 启动实测时顺带缓存「实测那一刻的 latest 块 + 墙钟」，供回填期把块号估算成时间戳（见 estimateTsFromBlock）。
+// 回填在启动测速后立刻跑，此 hint 仍新鲜；实时事件不用它（块≈now，调用方直接传 Date.now()）。
+const latestHint = new Map(); // chain -> { block: bigint, atMs }
 
 export async function measureSecPerBlock(chain) {
   const client = httpClient(chain);
   try {
     const latest = await client.getBlockNumber();
+    latestHint.set(chain, { block: latest, atMs: Date.now() });
     const span = latest > 1000n ? 1000n : latest > 10n ? 10n : 1n;
     const [b1, b0] = await Promise.all([
       client.getBlock({ blockNumber: latest }),
@@ -56,6 +60,16 @@ export async function measureSecPerBlock(chain) {
 
 export function getSecPerBlock(chain) {
   return secPerBlockCache.get(chain) || chainConfig(chain).secPerBlockFallback || 1;
+}
+
+// 由块号估算墙钟时间戳(ms)：ts ≈ hint.atMs − (hintBlock − block) × secPerBlock × 1000。
+// 仅回填用（block 落后于 hint）；hint 缺失或块号异常时回落 Date.now()，不再额外查块（避免每币一次 RPC）。
+export function estimateTsFromBlock(chain, block) {
+  const h = latestHint.get(chain);
+  if (!h || !block) return Date.now();
+  const sec = getSecPerBlock(chain);
+  const ts = h.atMs - Number(h.block - BigInt(block)) * sec * 1000;
+  return Number.isFinite(ts) && ts > 0 ? Math.round(ts) : Date.now();
 }
 
 // WebSocket 客户端：用于订阅日志 (discover)。自动重连。

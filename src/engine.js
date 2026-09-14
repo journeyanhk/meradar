@@ -3,7 +3,7 @@ import { readToken, quoteUsd, resolveQuote, readTokenInfo } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { store } from './db.js';
 import { config, chainConfig } from './config.js';
-import { httpClient, getSecPerBlock } from './chain.js';
+import { httpClient, getSecPerBlock, estimateTsFromBlock } from './chain.js';
 import { fourMemeEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents } from './abi.js';
 import { bus, Events } from './bus.js';
 import { startTracker } from './track.js';
@@ -62,7 +62,9 @@ async function onCreate(c) {
     decimals: 18, // Four.meme 曲线代币固定 18 位
     total_supply: c.totalSupply != null ? c.totalSupply.toString() : null,
     creator: c.creator || null, pool: null, pool_type: null, quote_symbol: null,
-    launch_time: c.launchTime != null ? Number(c.launchTime) * 1000 : null,
+    // 发射时刻(狙击时间窗输入)：链上 launchTime 有效(>0)才用；Four.meme 常为 0(会被存成 1970 年，
+    // 比 null 更隐蔽地让时间窗恒 false)、Pons 为 null → 回退：回填用块号估算(c.launchTs)，实时用 now。
+    launch_time: c.launchTime > 0 ? Number(c.launchTime) * 1000 : (c.launchTs || Date.now()),
     status: 'seen', discovered_at: now, updated_at: now,
   });
   if (!inserted) return;
@@ -409,6 +411,7 @@ async function backfillFourMeme(chain, hours = 2) {
           creator: a.creator || null, name: a.name || null, symbol: a.symbol || null,
           totalSupply: a.totalSupply ?? null, launchTime: a.launchTime ?? null,
           tx: l.transactionHash, block: Number(l.blockNumber || 0),
+          launchTs: estimateTsFromBlock(chain, Number(l.blockNumber || 0)),
         }).catch(() => {});
         count++;
       } else if (l.eventName === 'TokenPurchase' || l.eventName === 'TokenSale') {
@@ -470,6 +473,7 @@ async function backfillPonsLaunches(chain, hours = 2) {
         curve: ar.curve, quote: ar.pairToken,
         graduationThreshold: ar.graduationThreshold != null ? ar.graduationThreshold.toString() : null,
         tx: l.transactionHash, block: Number(l.blockNumber || 0),
+        launchTs: estimateTsFromBlock(chain, Number(l.blockNumber || 0)),
       }).catch(() => {});
       launches++;
     }
