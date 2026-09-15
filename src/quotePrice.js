@@ -134,7 +134,7 @@ async function priceTokenUsd(chain, token, tokenDec) {
   const bnb = getBnbUsd(chain);
   const refs = [];
   if (cfg.quoteTokens?.USDT) refs.push({ addr: getAddress(cfg.quoteTokens.USDT.address), dec: cfg.quoteTokens.USDT.decimals, usd: 1 });
-  if (cfg.quoteTokens?.WBNB) refs.push({ addr: getAddress(cfg.quoteTokens.WBNB.address), dec: cfg.quoteTokens.WBNB.decimals, usd: bnb });
+  if (cfg.quoteTokens?.WBNB && bnb > 0) refs.push({ addr: getAddress(cfg.quoteTokens.WBNB.address), dec: cfg.quoteTokens.WBNB.decimals, usd: bnb });
   const v2 = cfg.launchpads?.find((l) => l.type === 'amm-v2' && l.address && !/^0x0+$/.test(l.address));
   const v3 = cfg.launchpads?.find((l) => l.type === 'amm-v3' && l.address && !/^0x0+$/.test(l.address));
   const tok = getAddress(token);

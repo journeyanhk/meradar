@@ -119,7 +119,7 @@ export function resolveQuote(cfg, symOrAddr) {
 
 function quoteUsdPrice(chain, cfg, sym) {
   if (sym === 'USDT' || sym === 'USDC' || sym === 'BUSD' || sym === 'USD1' || sym === 'USDG') return 1;
-  if (sym === 'WBNB') return bnbUsdCache.get(chain) || cfg.wbnbUsdPriceFallback || 900;
+  if (sym === 'WBNB') return bnbUsdCache.get(chain) || (chain === 'bsc' ? cfg.wbnbUsdPriceFallback || 900 : null);
   // Robinhood 原生 ETH 计价：M1 用 fallback 常量(nativeUsdFallback)，M3 接真实 ETH/USD 池刷新缓存。
   if (sym === 'ETH') return nativeUsdCache.get(chain) || cfg.nativeUsdFallback || 4500;
   // 动态报价币（SPCXB 等）：查缓存美元价；不可信/未定价 → null，调用方按「无可信价格」处理，不再瞎套 fallback。
@@ -154,7 +154,11 @@ export async function refreshBnbUsd(chain) {
 
 export function getBnbUsd(chain) {
   const cfg = chainConfig(chain);
-  return bnbUsdCache.get(chain) || cfg.wbnbUsdPriceFallback || 900;
+  const cached = bnbUsdCache.get(chain);
+  if (cached) return cached;
+  // 常量回落只对 BSC 有意义（WBNB 是 BSC 原生计价币）。其它链没有真实来源时返回 0，
+  // 让上层按「无可信价格」处理，而不是套一个 BSC 的数字（见 $MUMO 教训）。
+  return chain === 'bsc' ? cfg.wbnbUsdPriceFallback || 900 : 0;
 }
 
 // 原生资产(Robinhood 的 ETH)美元价：复用 BSC Pancake ETH/USDT 池(与 refreshBnbUsd 同源同模式，
