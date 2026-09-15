@@ -261,6 +261,10 @@ const stmt = {
     SELECT * FROM candidates WHERE status IN ('active','archived','rejected')
     ORDER BY (tier='T3') DESC, (tier='T2') DESC, updated_at DESC LIMIT ?
   `),
+  listFeedByChain: db.prepare(`
+    SELECT * FROM candidates WHERE status IN ('active','archived','rejected') AND chain = ?
+    ORDER BY (tier='T3') DESC, (tier='T2') DESC, updated_at DESC LIMIT ?
+  `),
   stats: db.prepare(`
     SELECT COUNT(*) AS total,
       SUM(CASE WHEN status='seen' THEN 1 ELSE 0 END) AS seen,
@@ -384,7 +388,9 @@ export const store = {
   staleSeen(beforeMs) { return stmt.staleSeen.all(beforeMs); },
   deleteStaleSeen(beforeMs) { return stmt.deleteStaleSeen.run(beforeMs).changes; },
   activeCandidates(limit = 400) { return stmt.activeCandidates.all(limit); },
-  feed(limit = 200) { return stmt.listFeed.all(limit); },
+  feed(limit = 200, chain = null) {
+    return chain && chain !== 'all' ? stmt.listFeedByChain.all(chain, limit) : stmt.listFeed.all(limit);
+  },
   stats(since24h) { return { ...stmt.stats.get(since24h), missed: stmt.missedKills.get().missed }; },
   addTrade(t) { stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, mcap_at_trade: null, fee_raw: null, tax_raw: null, block: null, ...t }); },
   lastTradeTs(key) { return stmt.lastTradeTs.get(key)?.ts ?? null; },

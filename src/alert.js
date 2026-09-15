@@ -11,6 +11,8 @@ const minTier = (a, b) => (RANK[a] <= RANK[b] ? a : b);
 const TRADE_FRESH_MS = 10 * 60_000; // 成交新鲜度：所有 T2 腿都要求近 10min 有成交
 const GRAD_FRESH_MS = 60 * 60_000;  // 毕业新鲜度：毕业腿把「毕业」当强提示的有效期
 const RT_FRESH_MS = 10 * 60_000;    // 往返新鲜度：毕业币强提示要求往返核验 ≤10min
+// 告警标题/正文链名前置：多链后一眼区分来源
+const CHAIN_TAG = { bsc: 'BSC', robinhood: 'RBH', arc: 'ARC' };
 
 export function linksFor(chain, cand) {
   const cfg = chainConfig(chain);
@@ -105,7 +107,8 @@ export async function maybeAlert(chain, cand, metrics) {
 
   bus.emit(Events.ALERT, { ...cand, tier: newTier, metrics, reason, links });
 
-  const title = `[${newTier}] ${cand.symbol || '新币'} ${usd(metrics.marketCapUsd)}`;
+  const chainTag = CHAIN_TAG[chain] || chain;
+  const title = `[${chainTag}][${newTier}] ${cand.symbol || '新币'} ${usd(metrics.marketCapUsd)}`;
   const body = renderBody(chain, cand, metrics, reason, links, newTier);
 
   let tg = false, sc = false;
@@ -159,7 +162,7 @@ function buildReason(tier, m) {
 function renderBody(chain, cand, m, reason, links, tier) {
   const l = [];
   if (m.tradeSafety?.source === 'unverified') l.push('⚠ <b>未核验路径：v4 往返尚未实现</b>');
-  l.push(`🛰️ <b>[${tier}] ${escape(cand.symbol)}</b>  ${escape(cand.name || '')}`);
+  l.push(`🛰️ <b>[${CHAIN_TAG[chain] || chain}][${tier}] ${escape(cand.symbol)}</b>  ${escape(cand.name || '')}`);
   l.push(`链: ${chain} · 发射台: ${cand.launchpad}`);
   l.push(reason);
   l.push(`<code>${cand.address}</code>`);

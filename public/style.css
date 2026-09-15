@@ -87,6 +87,11 @@ body {
 .badge.unknown { color: var(--muted); border-color: var(--muted); border-style: dashed; }
 .badge.stale { color: var(--muted); border-color: var(--line); opacity: .85; }
 .badge.noliq { color: var(--t1); border-color: var(--t1); }
+/* 链徽章：区分 BSC / Robinhood / Arc */
+.badge.chain { font-weight: 700; letter-spacing: .3px; }
+.badge.chain-bsc { color: #111; background: #f3ba2f; border-color: #f3ba2f; }
+.badge.chain-robinhood { color: #fff; background: #00c805; border-color: #00c805; }
+.badge.chain-arc { color: #fff; background: #6f5cff; border-color: #6f5cff; }
 
 .metrics { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; color: var(--muted); font-size: 12px; }
 .metrics b { color: var(--text); font-weight: 600; }

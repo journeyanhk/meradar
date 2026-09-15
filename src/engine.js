@@ -226,15 +226,15 @@ async function onSwap(sw) {
 
 // promote 时反查池子（逻辑已抽到 src/pool.js，engine 与 track 共用）
 
-// Pons 毕业(PoolGraduated)：v4 池地址/定价待 M2b；M1 先记毕业时刻(供新鲜度 + 前端「已毕业」态)。
-// 毕业后 curve 余额归零、曲线成交停发，价格会冻结在毕业瞬间，直到 M2b 接上 v4 定价。
+// Pons 毕业(PoolGraduated)：记毕业时刻(供新鲜度 + 前端「已毕业」态)，并触发 v4 定向订阅重建，
+// 后续 Swap/PoolRegistered 接上 v4 定价（见 engine onSwap / poolstate）。
 async function onGraduate(g) {
   const key = `${g.chain}:${g.address.toLowerCase()}`;
   if (!store.get(key)) return;
   store.markGraduated(key, g.ts || Date.now());
-  bus.emit(Events.POOLS_CHANGED, { chain: g.chain }); // M2b 将据此重建 v4 定向订阅
+  bus.emit(Events.POOLS_CHANGED, { chain: g.chain }); // 据此重建 v4 定向订阅
   bus.emit(Events.UPDATE, { ...store.get(key) });
-  log.info({ chain: g.chain, token: g.address }, 'Pons 毕业(PoolGraduated)：已记毕业时刻，v4 定价待 M2b');
+  log.info({ chain: g.chain, token: g.address }, 'Pons 毕业(PoolGraduated)：已记毕业时刻，v4 池登记后接定价');
 }
 
 // Pons 清算中(LaunchSwept)：毕业前的过渡态；M1 仅记录，前端「毕业中」态与 v4 建池由 M2b 补。

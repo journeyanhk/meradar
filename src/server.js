@@ -93,7 +93,8 @@ export async function startServer() {
 
   app.get('/api/tokens', async (req) => {
     const limit = Math.min(Number(req.query?.limit) || 200, 500);
-    return store.feed(limit).map(decorate);
+    const chain = req.query?.chain || null;
+    return store.feed(limit, chain).map(decorate);
   });
 
   app.get('/api/token/:key', async (req, reply) => {

@@ -16,7 +16,9 @@ async function selfCheckLogs(chain) {
   try {
     const client = httpClient(chain);
     const cfg = chainConfig(chain);
-    const addr = cfg.launchpads?.find((l) => l.address && !/^0x0+$/.test(l.address))?.address;
+    // 发射台地址：Four.meme 用 address，Pons 用 factory（工厂逐币部署）。任取一个有效地址做窄查询。
+    const addrOf = (l) => l.address || l.factory;
+    const addr = cfg.launchpads?.map(addrOf).find((a) => a && !/^0x0+$/.test(a));
     const latest = await client.getBlockNumber();
     const from = latest > 30n ? latest - 30n : 0n;
     await client.getLogs(addr ? { address: addr, fromBlock: from, toBlock: latest } : { fromBlock: from, toBlock: latest });

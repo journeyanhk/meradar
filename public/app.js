@@ -21,11 +21,26 @@ const feed = document.getElementById('feed');
 const empty = document.getElementById('empty');
 const cards = new Map(); // key -> element
 const state = new Map(); // key -> data
-const filters = { minLiq: 0, t2only: false, pause: false };
+// 筛选偏好持久化（避免刷新后又勾着「只看 T2+」而看不到刚 promote 的 T0/T1）
+const savedFilters = JSON.parse(localStorage.getItem('filters') || '{}');
+const filters = { minLiq: savedFilters.minLiq || 0, t2only: !!savedFilters.t2only, chain: savedFilters.chain || 'all', pause: false };
+function persistFilters() {
+  localStorage.setItem('filters', JSON.stringify({ minLiq: filters.minLiq, t2only: filters.t2only, chain: filters.chain }));
+}
 
-document.getElementById('fMinLiq').addEventListener('change', (e) => { filters.minLiq = +e.target.value; render(); });
-document.getElementById('fT2').addEventListener('change', (e) => { filters.t2only = e.target.checked; render(); });
+const elMinLiq = document.getElementById('fMinLiq');
+const elT2 = document.getElementById('fT2');
+const elChain = document.getElementById('fChain');
+elMinLiq.value = String(filters.minLiq);
+elT2.checked = filters.t2only;
+elMinLiq.addEventListener('change', (e) => { filters.minLiq = +e.target.value; persistFilters(); render(); });
+elT2.addEventListener('change', (e) => { filters.t2only = e.target.checked; persistFilters(); render(); });
+elChain.addEventListener('change', (e) => { filters.chain = e.target.value; persistFilters(); reload(); });
 document.getElementById('fPause').addEventListener('change', (e) => { filters.pause = e.target.checked; });
+
+// 链标识：徽章文案 + 徽章 class（颜色见 style.css）
+const CHAIN_LABEL = { bsc: 'BSC', robinhood: 'RBH', arc: 'ARC' };
+function chainLabel(c) { return CHAIN_LABEL[c] || (c ? c.slice(0, 3).toUpperCase() : '?'); }
 
 // ---------- 工具 ----------
 const RANK = { T0: 0, T1: 1, T2: 2, T3: 3 };
@@ -63,6 +78,7 @@ function sparkline(snaps) {
 
 function visible(d) {
   if (d.status === 'rejected') return false;
+  if (filters.chain !== 'all' && d.chain !== filters.chain) return false;
   if (filters.t2only && RANK[d.tier] < 2) return false;
   if ((d.liquidityUsd || 0) < filters.minLiq) return false;
   return true;
@@ -87,7 +103,7 @@ function cardHtml(d) {
   const tags = [];
   (d.narrativeHit || []).forEach((h) => tags.push(`<span class="tag">🔥${esc(h)}</span>`));
   if (d.copycats >= 3) tags.push(`<span class="tag">仿盘${d.copycats}</span>`);
-  const badges = [`<span class="badge ${d.tier}">${d.tier}</span>`];
+  const badges = [`<span class="badge chain chain-${esc(d.chain)}">${chainLabel(d.chain)}</span>`, `<span class="badge ${d.tier}">${d.tier}</span>`];
   if (d.graduated) badges.push('<span class="badge grad">毕业</span>');
   // M3-1b 价格新鲜度/撤池状态：撤池(真归零) > 价格未知(>24h) > 陈旧(>10min)，只显最严重一档。
   if (d.liquidityWithdrawn) badges.push('<span class="badge withdrawn">已撤池</span>');
@@ -162,12 +178,37 @@ function render() {
 }
 
 // ---------- 数据加载 ----------
-async function loadInitial() {
+// 按当前链筛选拉取：选定单链时带 ?chain= 走 SQL 级筛选，避免 BSC 大量 active 把 Robinhood 挤出 200 条上限。
+async function reload() {
+  for (const key of [...cards.keys()]) removeCard(key);
   try {
-    const r = await fetch('/api/tokens?limit=200');
+    const q = filters.chain && filters.chain !== 'all' ? `&chain=${encodeURIComponent(filters.chain)}` : '';
+    const r = await fetch(`/api/tokens?limit=200${q}`);
     const list = await r.json();
     list.reverse().forEach((d) => upsert(d, false));
   } catch { /* noop */ }
+  if (!feed.querySelector('.card')) empty.style.display = 'block';
+}
+
+// 链下拉：用后端启用的链填充（/api/health.chains）
+async function populateChains() {
+  try {
+    const h = await fetch('/api/health').then((r) => r.json());
+    const chains = h.chains || [];
+    for (const c of chains) {
+      const opt = document.createElement('option');
+      opt.value = c;
+      opt.textContent = `${CHAIN_LABEL[c] || c}`;
+      elChain.appendChild(opt);
+    }
+    elChain.value = filters.chain; // 恢复持久化选择（若该链已下线则回落 all）
+    if (elChain.value !== filters.chain) { filters.chain = 'all'; persistFilters(); }
+  } catch { /* noop */ }
+}
+
+async function loadInitial() {
+  await populateChains();
+  await reload();
   loadStats();
 }
 async function loadStats() {
