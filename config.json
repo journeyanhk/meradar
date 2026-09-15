@@ -148,7 +148,7 @@
       "allowUnverifiedStrong": { "until": "2026-09-30" },
       "tiers": {
         "T1": { "marketCapUsd": 30000 },
-        "T2": { "marketCapUsd": 150000, "minLiquidityUsd": 20000 }
+        "T2": { "marketCapUsd": 150000, "minLiquidityUsd": 20000, "momentumMinNetInUsd": 500 }
       },
       "narrativeKeywords": ["TSLA", "NVDA", "SPY", "HIMS", "MU", "AI", "Inu", "Pons", "Robinhood", "stock", "ETF"],
       "quoteTokens": {

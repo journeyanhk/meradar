@@ -73,8 +73,13 @@ test('买家数达标判 T1', () => {
   assert.equal(tierOf({}, { ...base, uniqueBuyers: 40 }), 'T1');
 });
 
-test('毕业(graduated)归入 T2 而非 T3', () => {
-  assert.equal(tierOf({}, { ...base, graduated: true }), 'T2');
+test('毕业腿加动量门：仅毕业无动量停 T1（Pons 高毕业率不刷屏）；毕业+动量才 T2', () => {
+  // 仅 graduated、无任何动量 -> 不再单独升 T2（毕业是流水线事件不是信号）
+  assert.notEqual(tierOf({}, { ...base, graduated: true }), 'T2');
+  // 毕业 + 新买家达标 -> T2
+  assert.equal(tierOf({}, { ...base, graduated: true, newBuyers30m: 12 }), 'T2');
+  // 毕业 + 净流入达标（深度门槛下限 $2000）-> T2
+  assert.equal(tierOf({}, { ...base, graduated: true, netIn30m: 2500 }), 'T2');
 });
 
 test('增速触发需满足最小买家基数', () => {
@@ -114,7 +119,7 @@ test('成交不新鲜(>10min)把 T2 封顶到 T1', () => {
 
 test('往返结果过期(>10min)时毕业币强提示被降级至 T1；新鲜则恢复 T2', () => {
   const now = 10_000_000;
-  const g = { ...base, graduated: true, graduatedAt: now - 5 * 60_000, now, lastTradeTs: now - 60_000 };
+  const g = { ...base, graduated: true, graduatedAt: now - 5 * 60_000, now, lastTradeTs: now - 60_000, newBuyers30m: 12 };
   // 往返过期 -> 封顶 T1
   const stale = evaluateTier({}, { ...g, roundTripCheckedAt: now - 11 * 60_000 });
   assert.equal(stale.rawTier, 'T2', '毕业腿(≤60min) -> rawTier T2');
@@ -506,6 +511,18 @@ test('narrativeHit：robinhood 叠加逐链关键词（TSLA 命中），未知�
   // 未知链不应命中 robinhood 专属词
   const none = narrativeHit('__no_such_chain__', 'TSLA moon', 'TSLA');
   assert.ok(!none.some((h) => h.toLowerCase() === 'tsla'));
+});
+
+test('narrativeHit：ASCII 关键词整词匹配——AI 不误命中 chain/train，Inu 不误命中 minute', () => {
+  // 子串误命中的三个反例：都不应命中
+  assert.deepEqual(narrativeHit('robinhood', 'onchain train', 'CHAIN'), []);
+  assert.deepEqual(narrativeHit('robinhood', 'every minute', 'MIN'), []);
+  assert.deepEqual(narrativeHit('robinhood', 'stocking filler', 'SOCK'), []);
+  // 整词命中：AI 作为独立词、$AI symbol
+  assert.ok(narrativeHit('robinhood', 'AI agent', '').some((h) => h === 'ai'));
+  assert.ok(narrativeHit('robinhood', 'super AI', 'AI').some((h) => h === 'ai'));
+  // Inu 作为整词命中
+  assert.ok(narrativeHit('robinhood', 'Shiba Inu', 'INU').some((h) => h === 'inu'));
 });
 
 // —— 往返模拟纯函数：taxBps 税率换算 ——

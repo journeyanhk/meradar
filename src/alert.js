@@ -57,9 +57,10 @@ export function evaluateTier(cand, m) {
     m.isOriginal &&
     m.copycats >= T.T2.copycatCount &&
     ((m.marketCapUsd || 0) >= T.T1.marketCapUsd * k || (m.netIn30m || 0) >= netInFloor);
-  // 毕业腿：仅在毕业时间新鲜(≤60min)时把「毕业」本身当强提示；老毕业币需靠实时动量重新达标，
-  // 避免换库/换 VPS 回填一批 8 小时前的毕业币启动即 T2 刷屏。
-  const gradLeg = !!m.graduated && gradFresh;
+  // 毕业腿：毕业新鲜(≤60min) 且 有动量才当强提示。高毕业率链(Pons 每小时毕业十余个)上
+  // 「毕业」本身是流水线事件而非信号，只把币推到 T1；毕业后 30min 内真有资金/买家承接才 T2。
+  // 也避免换库/换 VPS 回填一批老毕业币启动即 T2 刷屏。
+  const gradLeg = !!m.graduated && gradFresh && hasMomentum;
   const t2 =
     (m.marketCapUsd >= T.T2.marketCapUsd * k && m.liquidityUsd >= T.T2.minLiquidityUsd * k && hasMomentum) ||
     copycatQualifies ||
