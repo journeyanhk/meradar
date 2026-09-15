@@ -218,6 +218,9 @@ ensureColumns('candidates', [
   // Arc pool-first：seen 池成交订阅上限 500 的淘汰依据。按最后成交时间排序，让有量的池不被新建的空池挤出
   // (仅在 discoverFromPools 链的 onSwap 里 touch，BSC/Robinhood 不写 → 零回归)。
   ['last_trade_at', 'last_trade_at INTEGER'],
+  // 可试仓 v1：每轮 evaluateEntry 的结果 JSON({ ok, tier, sizeUsd, reasons, redFlags, auditVersion })。
+  // 只读展示/告警/统计，不参与分级(evaluateTier)。不写时保留上轮值；setEntry 不动 updated_at(不干扰排序/归档)。
+  ['entry_json', 'entry_json TEXT'],
 ]);
 // trades 已有 price(成交时单价 USD)=price_at_trade，无需重复列；只补 mcap_at_trade：
 // 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
@@ -351,6 +354,8 @@ const stmt = {
   // 既得 farm 集(≥N)又得每地址 tokens_bought_24h。key LIKE 'chain:%' 过滤链；first_ts>=since 限窗。
   buyerTokenCounts24h: db.prepare(`SELECT account, COUNT(DISTINCT key) AS n FROM buyers WHERE key LIKE @prefix AND first_ts >= @since GROUP BY account`),
   setBuyerFlags: db.prepare(`UPDATE candidates SET natural_buyers_30m=@natural_buyers_30m, soft_flags=@soft_flags, updated_at=@updated_at WHERE key=@key`),
+  // 可试仓结果落库：不动 updated_at(避免每轮 entry 变化污染 active 排序/归档的 last-active 判定)。
+  setEntry: db.prepare(`UPDATE candidates SET entry_json=@entry_json WHERE key=@key`),
   // buyer_profiles：addBuyer 首次命中某(链,地址,新币) → 累计 total + 更新 first/last_seen。
   bumpBuyerProfile: db.prepare(`
     INSERT INTO buyer_profiles (chain, account, first_seen, last_seen, tokens_bought_total)
@@ -454,6 +459,9 @@ export const store = {
   },
   setBuyerFlags(key, naturalBuyers30m, softFlags) {
     stmt.setBuyerFlags.run({ key, natural_buyers_30m: naturalBuyers30m | 0, soft_flags: softFlags ? JSON.stringify(softFlags) : null, updated_at: Date.now() });
+  },
+  setEntry(key, entry) {
+    stmt.setEntry.run({ key, entry_json: entry ? JSON.stringify(entry) : null });
   },
   setBuyerTags(chain, account, tags, tokens24h, ts = Date.now()) {
     stmt.setBuyerTags.run({ chain, account: account.toLowerCase(), tags: tags && tags.length ? tags.join(',') : null, tokens24h: tokens24h | 0, ts });

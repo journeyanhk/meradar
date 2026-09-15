@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { join } from 'node:path';
-import { ROOT, config, chainConfig } from './config.js';
+import { ROOT, config, chainConfig, entryFilterFor } from './config.js';
 import { store } from './db.js';
 import { bus, Events } from './bus.js';
 import { linksFor } from './alert.js';
@@ -10,10 +10,15 @@ import { templateHealth } from './template.js';
 import { rpcCapabilities } from './rpccap.js';
 import { rpcRouting } from './chain.js';
 import { child } from './logger.js';
-import { BUYER_TAGS } from './buyer.js';
+import { buyerRatios } from './buyer.js';
 import { PRICE_STALE_MS, PRICE_UNKNOWN_MS } from './price.js';
 
 const log = child('server');
+
+// JSON 列解析：坏数据不该炸接口，一律回退 null。
+function safeParse(json) {
+  try { return json ? JSON.parse(json) : null; } catch { return null; }
+}
 
 // farm/tokens_24h 分布：一周后按 99 分位定阈值前，先把每地址 24h 买过的不同新币数分位输出到 /api/health。
 // 60s 缓存(每链一次 buyers 表分组扫)，避免 health 被频繁调用时反复全扫。
@@ -48,20 +53,36 @@ function poolCreatorsSection() {
   return out;
 }
 
-// 软标记落库只存计数(buyerCount + 各标签数)；占比在此现算，避免同一份分布存两遍。
+// 软标记落库只存计数(buyerCount + 各标签数)；占比在此现算(共用 buyer.js/buyerRatios)，避免同一份分布存两遍。
 function softFlagsFrom(json) {
-  let f = null;
-  try { f = json ? JSON.parse(json) : null; } catch { return null; }
+  const f = safeParse(json);
   if (!f) return null;
-  const n = f.buyerCount || 0;
-  const ratios = {};
-  for (const t of BUYER_TAGS) ratios[`${t}Ratio`] = n > 0 ? (f[t] || 0) / n : 0;
-  return { ...f, ...ratios };
+  return { ...f, ...buyerRatios(f) };
+}
+
+// 可试仓命中统计：扫 active 候选的 entry_json，按链输出 auditVersion + A/B/合格数，供上线后调阈值参考。
+// 60s 缓存(与 farmDistribution 同理)，避免 health 频繁调用时反复全扫 active。
+let entryFilterCache = { at: 0, data: null };
+function entryFilterSection() {
+  if (entryFilterCache.data && Date.now() - entryFilterCache.at < 60_000) return entryFilterCache.data;
+  const out = {};
+  for (const chain of config.enabledChains) {
+    out[chain] = { auditVersion: entryFilterFor(chain).auditVersion || 'v1', evaluated: 0, ok: 0, A: 0, B: 0 };
+  }
+  for (const c of store.activeCandidates(1000)) {
+    const o = out[c.chain];
+    if (!o) continue;
+    const e = safeParse(c.entry_json);
+    if (!e) continue;
+    o.evaluated++;
+    if (e.ok) { o.ok++; if (e.tier === 'A') o.A++; else if (e.tier === 'B') o.B++; }
+  }
+  entryFilterCache = { at: Date.now(), data: out };
+  return out;
 }
 
 function decorate(c) {
-  let safety = null;
-  try { safety = c.safety_json ? JSON.parse(c.safety_json) : null; } catch { /* noop */ }
+  const safety = safeParse(c.safety_json);
   const peak = c.peak_mcap_usd || 0;
   const drawdownPct = peak > 0 ? Math.max(0, ((peak - (c.market_cap_usd || 0)) / peak) * 100) : 0;
   return {
@@ -82,6 +103,7 @@ function decorate(c) {
     maxBuy10m: c.max_buy_10m || 0, buyRatio30m: c.buy_ratio_30m || 0, newBuyers30m: c.new_buyers_30m || 0,
     naturalBuyers30m: c.natural_buyers_30m || 0,
     softFlags: softFlagsFrom(c.soft_flags),
+    entry: safeParse(c.entry_json),
     holders: c.holders, uniqueBuyers: c.unique_buyers, copycats: c.copycats,
     narrativeHit: c.narrative_hit ? c.narrative_hit.split(',').filter(Boolean) : [],
     discoveredAt: c.discovered_at, updatedAt: c.updated_at,
@@ -104,6 +126,7 @@ export async function startServer() {
     template: templateHealth(), // { promoted24h, templateUnknownRate, learned } —— 未知率>5% 提示模板轮换
     buyerGrading: farmDistribution(), // 每链 tokens_bought_24h 分位(50/90/99/max) + farm 命中数，供一周后定阈值
     poolCreators24h: poolCreatorsSection(), // pool-first 链(Arc)首日反推发射台：建池者/被调合约 Top10
+    entryFilter: entryFilterSection(), // 可试仓命中：各链 auditVersion + A/B/合格数(active 扫描)，供调阈值参考
     time: Date.now(),
   }));
 

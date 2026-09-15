@@ -16,6 +16,8 @@ import { classifyAccount, classifyTokenBuyers, taxPositive, BUYER_DEFAULTS } fro
 import { resolvePrice, sourceOf, PRICE_STALE_MS, PRICE_UNKNOWN_MS, isImplausibleUsd } from '../src/price.js';
 import { isFullRangePool } from '../src/enrich.js';
 import { recordPoolState, getPoolState, forgetPoolState } from '../src/poolstate.js';
+import { evaluateEntry } from '../src/entry.js';
+import { buyerRatios } from '../src/buyer.js';
 
 // —— 1. Four.meme 事件签名的 topic0 必须与真实链上日志一致 ——
 // 这些 topic0 来自实际观测（见 review 报告）。类型排错会导致 selector 变化。
@@ -1137,4 +1139,105 @@ test('metaBackoffMs：1m,1m,5m,5m,15m…索引超界取末位 15m', () => {
   assert.equal(metaBackoffMs(3), 300_000);
   assert.equal(metaBackoffMs(5), 900_000);
   assert.equal(metaBackoffMs(99), 900_000); // 超界 → 末位
+});
+
+// —— 可试仓 v1（evaluateEntry 纯函数）——
+const EF = {
+  enabled: true, auditVersion: 'v1',
+  hard: { minDepthUsd: 8000, maxMcapUsd: 300000, requirePriceOk: true },
+  structure: { minNaturalRatio: 0.45, maxSniperRatio: 0.40, maxFarmRatio: 0.30, maxDustRatio: 0.60, minNaturalBuyers30m: 5, minBuyerCount: 12 },
+  momentum: { minNetIn30m: 500, tierANetIn30m: 2000, maxDrawdownPct: 65 },
+  sizing: { depthPct: 0.02, tierAMaxUsd: 200, tierBMaxUsd: 100, unverifiedHalve: true, roundTo: 10 },
+  rejectSoftFlags: ['数据冲突'],
+};
+// buyerCount 20：自然12(0.6)、狙击4(0.2)、工作室2(0.1)、粉尘5(0.25) —— 全部达标
+const goodCounts = { buyerCount: 20, naturalBuyers: 12, sniper: 4, farm: 2, dust: 5, bot: 0, fresh: 0, flipper: 0 };
+// 各 metrics 内联 peakMcapUsd:60000(mcap 50000 → 回撤 ~16%)
+
+test('buyerRatios：从计数现算占比 + 自然占比', () => {
+  const r = buyerRatios(goodCounts);
+  assert.equal(r.naturalRatio, 0.6);
+  assert.equal(r.sniperRatio, 0.2);
+  assert.equal(r.farmRatio, 0.1);
+  assert.equal(buyerRatios({ buyerCount: 0 }).sniperRatio, 0); // 无买家不除零
+});
+
+test('可试仓：安全 PASS + 强动能 → A，仓位跟深度(min(上限, 深度×2%))', () => {
+  const m = { depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS', source: 'roundtrip' } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, true);
+  assert.equal(e.tier, 'A');
+  assert.equal(e.sizeUsd, 200); // min(200, 20000*0.02=400)=200
+  assert.equal(e.auditVersion, 'v1');
+});
+
+test('可试仓：深度小 → 仓位由深度封顶(160 而非上限 200)', () => {
+  const m = { depthUsd: 8000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, true);
+  assert.equal(e.sizeUsd, 160); // min(200, 8000*0.02=160)=160
+});
+
+test('可试仓：弱动能(净流入达下限但未达 A 线) → B', () => {
+  const m = { depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 800, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, true);
+  assert.equal(e.tier, 'B');
+  assert.equal(e.sizeUsd, 100); // min(100, 400)=100
+});
+
+test('可试仓：WAIT+unverified(v4 豁免) → 放行但封顶 B 且仓位减半', () => {
+  const m = { depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'WAIT', source: 'unverified', softFlags: ['未核验路径'] } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, true);
+  assert.equal(e.tier, 'B');            // unverified 始终封顶 B(即便净流入达 A 线)
+  assert.equal(e.sizeUsd, 50);          // min(100,400)=100 → 减半 50
+});
+
+test('可试仓：深度不足 → 硬拒', () => {
+  const m = { depthUsd: 3000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, false);
+  assert.equal(e.tier, null);
+  assert.ok(e.redFlags.some((r) => r.includes('深度不足')));
+});
+
+test('可试仓：狙击占比过高 → 硬拒', () => {
+  const bad = { buyerCount: 20, naturalBuyers: 8, sniper: 10, farm: 0, dust: 0 }; // 狙击 0.5 > 0.4
+  const m = { depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, bad);
+  assert.equal(e.ok, false);
+  assert.ok(e.redFlags.some((r) => r.includes('狙击')));
+});
+
+test('可试仓：数据冲突软标记 → 硬拒(读 tradeSafety.softFlags)', () => {
+  const m = { depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'WAIT', source: 'conflict', softFlags: ['数据冲突'] } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, false);
+  assert.ok(e.redFlags.some((r) => r.includes('数据冲突')));
+});
+
+test('可试仓：回撤过深 → 硬拒', () => {
+  const m = { depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 200000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, goodCounts); // 回撤 75% > 65%
+  assert.equal(e.ok, false);
+  assert.ok(e.redFlags.some((r) => r.includes('回撤')));
+});
+
+test('可试仓：无买家计数 → 数据不足硬拒(保守)', () => {
+  const m = { depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, null);
+  assert.equal(e.ok, false);
+  assert.ok(e.redFlags.some((r) => r.includes('买家数据不足')));
+});
+
+test('可试仓：价格状态非 ok → 硬拒', () => {
+  const m = { depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'stale', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, false);
+});
+
+test('可试仓：配置未启用 → 返回 null(不产出)', () => {
+  const m = { depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  assert.equal(evaluateEntry(m, { enabled: false }, goodCounts), null);
 });

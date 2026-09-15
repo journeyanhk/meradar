@@ -87,3 +87,18 @@ export function admissionFor(chain) {
   const c = chain ? config.chains?.[chain]?.admission : null;
   return c ?? config.admission?.minBuyersToActivate ?? 5;
 }
+
+// 可试仓过滤阈值：全局 config.entryFilter 为底，chains.<chain>.entryFilter 覆盖(hard/structure/momentum/sizing 逐组浅合并)。
+// Robinhood 毕业市值/池偏小 → 门槛略降；Arc 首日更严、仓位更小。缺省返回全局(未配则 {})。
+export function entryFilterFor(chain) {
+  const base = config.entryFilter || {};
+  const ov = chain ? config.chains?.[chain]?.entryFilter : null;
+  if (!ov) return base;
+  return {
+    ...base, ...ov,
+    hard: { ...(base.hard || {}), ...(ov.hard || {}) },
+    structure: { ...(base.structure || {}), ...(ov.structure || {}) },
+    momentum: { ...(base.momentum || {}), ...(ov.momentum || {}) },
+    sizing: { ...(base.sizing || {}), ...(ov.sizing || {}) },
+  };
+}

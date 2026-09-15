@@ -161,12 +161,21 @@ function buildReason(tier, m) {
   return parts.join(' · ') || tier;
 }
 
+// 可试仓行：ok 时显示 A/B + 建议仓位；仅在满足过滤门时出现(不满足则无此行，不刷噪音)。
+function entryLine(m) {
+  const e = m.entry;
+  if (!e || !e.ok) return null;
+  return `✅ 可试仓 ${e.tier} · 建议 ${usd(e.sizeUsd)}${e.auditVersion ? ` (${e.auditVersion})` : ''}`;
+}
+
 function renderBody(chain, cand, m, reason, links, tier) {
   const l = [];
   if (m.tradeSafety?.source === 'unverified') l.push('⚠ <b>未核验路径：v4 往返尚未实现</b>');
   l.push(`🛰️ <b>[${CHAIN_TAG[chain] || chain}][${tier}] ${escape(cand.symbol)}</b>  ${escape(cand.name || '')}`);
   l.push(`链: ${chain} · 发射台: ${cand.launchpad}`);
   l.push(reason);
+  const entry = entryLine(m);
+  if (entry) l.push(entry);
   l.push(`<code>${cand.address}</code>`);
   const linkline = Object.entries(links).map(([k, v]) => `<a href="${v}">${k}</a>`).join(' · ');
   l.push(linkline);
@@ -179,6 +188,8 @@ function renderMarkdown(chain, cand, m, reason, links) {
   l.push(`**${escape(cand.name || cand.symbol)}** (${escape(cand.symbol)})`);
   l.push(`- 链 / 发射台: ${chain} / ${cand.launchpad}`);
   l.push(`- ${reason}`);
+  const entry = entryLine(m);
+  if (entry) l.push(`- ${entry}`);
   l.push(`- 合约: \`${cand.address}\``);
   for (const [k, v] of Object.entries(links)) l.push(`- [${k}](${v})`);
   return l.join('\n');

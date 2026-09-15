@@ -21,6 +21,16 @@ export const BUYER_DEFAULTS = {
 // 标签集合的单一来源：分类、计数初始化、比率键、软标记均引用它，杜绝魔法字符串漂移。
 export const BUYER_TAGS = ['sniper', 'bot', 'farm', 'dust', 'fresh', 'flipper'];
 
+// 从落库的计数(softFlags: { buyerCount, naturalBuyers, sniper, bot, ... })现算各标签占比 + 自然占比。
+// 单一实现：server.js 的 API 层(softFlagsFrom)与 track.js 的可试仓过滤(entry.js 输入)共用，避免两处漂移。
+export function buyerRatios(counts) {
+  const n = counts?.buyerCount || 0;
+  const out = {};
+  for (const t of BUYER_TAGS) out[`${t}Ratio`] = n > 0 ? (counts?.[t] || 0) / n : 0;
+  out.naturalRatio = n > 0 ? (counts?.naturalBuyers || 0) / n : 0;
+  return out;
+}
+
 /**
  * 对单个地址在某币上的成交做分级。
  * @param acct {{ buys: Array<{ts,block,quoteUsd,tokens,hasTax}>, sells: Array<{ts,tokens}> }}

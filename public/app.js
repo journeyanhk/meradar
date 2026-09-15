@@ -23,18 +23,21 @@ const cards = new Map(); // key -> element
 const state = new Map(); // key -> data
 // 筛选偏好持久化（避免刷新后又勾着「只看 T2+」而看不到刚 promote 的 T0/T1）
 const savedFilters = JSON.parse(localStorage.getItem('filters') || '{}');
-const filters = { minLiq: savedFilters.minLiq || 0, t2only: !!savedFilters.t2only, chain: savedFilters.chain || 'all', pause: false };
+const filters = { minLiq: savedFilters.minLiq || 0, t2only: !!savedFilters.t2only, entryOnly: !!savedFilters.entryOnly, chain: savedFilters.chain || 'all', pause: false };
 function persistFilters() {
-  localStorage.setItem('filters', JSON.stringify({ minLiq: filters.minLiq, t2only: filters.t2only, chain: filters.chain }));
+  localStorage.setItem('filters', JSON.stringify({ minLiq: filters.minLiq, t2only: filters.t2only, entryOnly: filters.entryOnly, chain: filters.chain }));
 }
 
 const elMinLiq = document.getElementById('fMinLiq');
 const elT2 = document.getElementById('fT2');
+const elEntry = document.getElementById('fEntry');
 const elChain = document.getElementById('fChain');
 elMinLiq.value = String(filters.minLiq);
 elT2.checked = filters.t2only;
+elEntry.checked = filters.entryOnly;
 elMinLiq.addEventListener('change', (e) => { filters.minLiq = +e.target.value; persistFilters(); render(); });
 elT2.addEventListener('change', (e) => { filters.t2only = e.target.checked; persistFilters(); render(); });
+elEntry.addEventListener('change', (e) => { filters.entryOnly = e.target.checked; persistFilters(); render(); });
 elChain.addEventListener('change', (e) => { filters.chain = e.target.value; persistFilters(); reload(); });
 document.getElementById('fPause').addEventListener('change', (e) => { filters.pause = e.target.checked; });
 
@@ -80,6 +83,7 @@ function visible(d) {
   if (d.status === 'rejected') return false;
   if (filters.chain !== 'all' && d.chain !== filters.chain) return false;
   if (filters.t2only && RANK[d.tier] < 2) return false;
+  if (filters.entryOnly && !(d.entry && d.entry.ok)) return false;
   if ((d.liquidityUsd || 0) < filters.minLiq) return false;
   return true;
 }
@@ -105,6 +109,8 @@ function cardHtml(d) {
   if (d.copycats >= 3) tags.push(`<span class="tag">仿盘${d.copycats}</span>`);
   const badges = [`<span class="badge chain chain-${esc(d.chain)}">${chainLabel(d.chain)}</span>`, `<span class="badge ${d.tier}">${d.tier}</span>`];
   if (d.graduated) badges.push('<span class="badge grad">毕业</span>');
+  // 可试仓 v1：满足小资金试仓门时显绿标(A/B + 建议仓位)，供快速筛选。
+  if (d.entry && d.entry.ok) badges.push(`<span class="badge entry" title="${esc((d.entry.reasons || []).join(' · '))}">可试仓 ${esc(d.entry.tier)} ${usd(d.entry.sizeUsd)}</span>`);
   // M3-1b 价格新鲜度/撤池状态：撤池(真归零) > 价格未知(>24h) > 陈旧(>10min)，只显最严重一档。
   if (d.liquidityWithdrawn) badges.push('<span class="badge withdrawn">已撤池</span>');
   else if (d.priceState === 'implausible') badges.push('<span class="badge implausible">数据异常·已隐藏</span>');

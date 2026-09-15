@@ -81,6 +81,7 @@ body {
 .badge.T2 { color: var(--t2); border-color: var(--t2); }
 .badge.T3 { color: var(--t3); border-color: var(--t3); }
 .badge.grad { color: var(--ok); border-color: var(--ok); }
+.badge.entry { color: #fff; background: var(--ok); border-color: var(--ok); font-weight: 700; }
 .badge.rej { color: var(--t2); border-color: var(--t2); }
 /* M3-1b 价格状态：撤池(红)、价格未知/陈旧(灰)、当前价位无流动性(灰) */
 .badge.withdrawn { color: #fff; background: var(--t2); border-color: var(--t2); }

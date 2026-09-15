@@ -5,8 +5,9 @@ import { scoreCandidate, evaluateTradeSafety } from './score.js';
 import { discoverPool, graduatedByCurve } from './pool.js';
 import { narrativeHit, copycatCount } from './narrative.js';
 import { maybeAlert, evaluateTier } from './alert.js';
+import { evaluateEntry } from './entry.js';
 import { store } from './db.js';
-import { config, chainConfig } from './config.js';
+import { config, chainConfig, entryFilterFor } from './config.js';
 import { httpClient } from './chain.js';
 import { bus, Events } from './bus.js';
 import * as momentum from './momentum.js';
@@ -277,6 +278,7 @@ export async function pollCandidate(chain, cand) {
     maxBuy10m: flow.maxBuy10,
     buyRatio30m: flow.buyRatio30,
     newBuyers30m: flow.newBuyers30m,
+    naturalBuyers30m,
     copycats,
     narrativeHits: hits,
     isOriginal: !cand.copy_of,
@@ -341,6 +343,15 @@ export async function pollCandidate(chain, cand) {
       }
     }
   }
+  // 可试仓 v1：用本轮最终 metrics(含可能刷新过的 tradeSafety) + 买家计数评估小资金试仓门。
+  // 纯函数、只读、落库不动 updated_at；结果挂进 metrics 供告警安全行下方追加「可试仓」提示。
+  // peakMcapUsd 取 updateMetrics 后的 fresh 行(已 MAX 进本轮 mcap)，供回撤判定。
+  metrics.peakMcapUsd = fresh?.peak_mcap_usd || 0;
+  const entry = evaluateEntry(metrics, entryFilterFor(chain), softFlags);
+  const entryJson = entry ? JSON.stringify(entry) : null;
+  if ((fresh?.entry_json ?? null) !== entryJson) store.setEntry(cand.key, entry);
+  metrics.entry = entry;
+
   await maybeAlert(chain, fresh, metrics);
   bus.emit(Events.UPDATE, { ...store.get(cand.key) });
 }
