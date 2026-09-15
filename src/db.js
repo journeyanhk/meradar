@@ -6,6 +6,7 @@ import { ROOT } from './config.js';
 mkdirSync(join(ROOT, 'data'), { recursive: true });
 const db = new DatabaseSync(join(ROOT, 'data', 'meradar.sqlite'));
 db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA busy_timeout = 5000'); // 等锁最多 5s，避免与在跑的服务并发写时立刻 SQLITE_BUSY
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS candidates (
