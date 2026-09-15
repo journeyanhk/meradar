@@ -126,7 +126,8 @@
       },
       "narrativeKeywords": ["Arc", "Circle", "USDC", "stock", "TSLA", "NVDA", "SPY", "HIMS", "AI", "ETF", "RWA"],
       "quoteTokens": {
-        "USDC": { "address": "0x3600000000000000000000000000000000000000", "decimals": 6, "native": true }
+        "USDC": { "address": "0x3600000000000000000000000000000000000000", "decimals": 6, "native": true },
+        "USDC_NATIVE": { "address": "0x0000000000000000000000000000000000000000", "decimals": 18, "native": true }
       },
       "launchpads": [
         {

@@ -118,7 +118,7 @@ export function resolveQuote(cfg, symOrAddr) {
 }
 
 function quoteUsdPrice(chain, cfg, sym) {
-  if (sym === 'USDT' || sym === 'USDC' || sym === 'BUSD' || sym === 'USD1' || sym === 'USDG') return 1;
+  if (sym === 'USDT' || sym === 'USDC' || sym === 'USDC_NATIVE' || sym === 'BUSD' || sym === 'USD1' || sym === 'USDG') return 1;
   if (sym === 'WBNB') return bnbUsdCache.get(chain) || (chain === 'bsc' ? cfg.wbnbUsdPriceFallback || 900 : null);
   // Robinhood 原生 ETH 计价：M1 用 fallback 常量(nativeUsdFallback)，M3 接真实 ETH/USD 池刷新缓存。
   if (sym === 'ETH') return nativeUsdCache.get(chain) || cfg.nativeUsdFallback || 4500;

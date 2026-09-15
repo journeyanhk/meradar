@@ -215,6 +215,9 @@ ensureColumns('candidates', [
   // 价格状态：ok|stale|unknown|withdrawn|implausible。implausible=合理性钳位命中(报价币单位错误)，
   // 卡片显示「数据异常·已隐藏」而非 $0，与真归零/未定价区分。
   ['price_state', 'price_state TEXT'],
+  // Arc pool-first：seen 池成交订阅上限 500 的淘汰依据。按最后成交时间排序，让有量的池不被新建的空池挤出
+  // (仅在 discoverFromPools 链的 onSwap 里 touch，BSC/Robinhood 不写 → 零回归)。
+  ['last_trade_at', 'last_trade_at INTEGER'],
 ]);
 // trades 已有 price(成交时单价 USD)=price_at_trade，无需重复列；只补 mcap_at_trade：
 // 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
@@ -314,8 +317,9 @@ const stmt = {
   // 某链的成交订阅池集合：默认仅 active（BSC/Robinhood）。discoverFromPools 链(Arc)额外含 seen——
   // pool-first 币登记即建池、需订阅 Swap 计买家才能升 active；按毕业时刻倒序取近 500，防订阅量失控。
   swapPoolsByChain: db.prepare(`SELECT key, chain, address, decimals, pool, pool_type, quote_symbol FROM candidates WHERE chain=? AND status='active' AND pool IS NOT NULL`),
-  swapPoolsByChainInclSeen: db.prepare(`SELECT key, chain, address, decimals, pool, pool_type, quote_symbol FROM candidates WHERE chain=? AND status IN ('active','seen') AND pool IS NOT NULL ORDER BY COALESCE(graduated_at, discovered_at) DESC LIMIT 500`),
+  swapPoolsByChainInclSeen: db.prepare(`SELECT key, chain, address, decimals, pool, pool_type, quote_symbol FROM candidates WHERE chain=? AND status IN ('active','seen') AND pool IS NOT NULL ORDER BY COALESCE(last_trade_at, graduated_at, discovered_at) DESC LIMIT 500`),
   addPoolCreator: db.prepare(`INSERT INTO pool_creators (chain, ts, creator, contract, pool, tx) VALUES (@chain, @ts, @creator, @contract, @pool, @tx)`),
+  touchLastTrade: db.prepare(`UPDATE candidates SET last_trade_at=? WHERE key=?`),
   poolCreatorsByCreator: db.prepare(`SELECT creator AS id, COUNT(*) AS n FROM pool_creators WHERE chain=? AND ts>=? AND creator IS NOT NULL GROUP BY creator ORDER BY n DESC LIMIT 10`),
   poolCreatorsByContract: db.prepare(`SELECT contract AS id, COUNT(*) AS n FROM pool_creators WHERE chain=? AND ts>=? AND contract IS NOT NULL GROUP BY contract ORDER BY n DESC LIMIT 10`),
   bumpTemplateHash: db.prepare(`INSERT INTO template_hashes (chain, hash, kind, first_seen, count) VALUES (@chain, @hash, @kind, @ts, 1) ON CONFLICT(chain, hash) DO UPDATE SET count = count + 1`),
@@ -483,6 +487,8 @@ export const store = {
   addPoolCreator({ chain, ts = Date.now(), creator = null, contract = null, pool = null, tx = null }) {
     stmt.addPoolCreator.run({ chain, ts, creator, contract, pool, tx });
   },
+  // pool-first seen 池成交时刷新最后成交时刻，供 swapPoolsByChainInclSeen 淘汰排序(有量的池不被空池挤出)。
+  touchLastTrade(key, ts) { stmt.touchLastTrade.run(ts, key); },
   poolCreators24h(chain, since) {
     return { byCreator: stmt.poolCreatorsByCreator.all(chain, since), byContract: stmt.poolCreatorsByContract.all(chain, since) };
   },

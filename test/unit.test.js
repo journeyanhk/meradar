@@ -4,9 +4,10 @@ import { toEventSelector } from 'viem';
 import { fourMemeEvents } from '../src/abi.js';
 import { evaluateTier } from '../src/alert.js';
 import { classifyTradeSafety } from '../src/score.js';
-import { resolveQuote } from '../src/enrich.js';
+import { resolveQuote, quoteUsd } from '../src/enrich.js';
 import { normalizeSwap, pickToken } from '../src/discover.js';
 import { admissionFor } from '../src/config.js';
+import { chainConfig } from '../src/config.js';
 import * as momentum from '../src/momentum.js';
 import { graduatedByCurve } from '../src/pool.js';
 import { goplusCheck } from '../src/goplus.js';
@@ -1078,4 +1079,18 @@ test('未开豁免的链：毕业后无往返 → 回落 WAIT/T1(安全默认)',
   });
   assert.equal(r.state, 'WAIT');
   assert.equal(r.capTier, 'T1', '无豁免 → 封顶 T1');
+});
+
+test('Arc 原生 USDC：0x0(v4 currency0) 解析为 USDC_NATIVE(18位, $1)，0x3600(ERC-20 视图) 仍为 USDC(6位)', () => {
+  const arc = chainConfig('arc');
+  // v4 原生腿 0x0 → 优先命中地址为 0x0 的 native 条目 USDC_NATIVE，18 位
+  const nat = resolveQuote(arc, '0x0000000000000000000000000000000000000000');
+  assert.equal(nat.sym, 'USDC_NATIVE');
+  assert.equal(nat.decimals, 18, 'v4 原生资产按 wei 记账=18 位');
+  assert.equal(quoteUsd('arc', 'USDC_NATIVE'), 1, '稳定币美元价固定 1');
+  // V3/V2 的 ERC-20 视图 0x3600 → USDC，6 位（不能与 18 位原生腿混用）
+  const erc = resolveQuote(arc, '0x3600000000000000000000000000000000000000');
+  assert.equal(erc.sym, 'USDC');
+  assert.equal(erc.decimals, 6);
+  assert.equal(quoteUsd('arc', 'USDC'), 1);
 });

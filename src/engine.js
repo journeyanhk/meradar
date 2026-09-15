@@ -213,10 +213,13 @@ async function onSwap(sw) {
   const isBuy = sw.side === 'buy';
   momentum.onTrade({ token: sw.address, account: isBuy ? sw.account : null, isBuy, ts: sw.ts });
 
-  // Arc pool-first：seen 币的池成交只喂动量计买家，达 admission 才升 active；升级前不写 trades
+  // Arc pool-first：seen 池成交只喂动量计买家，达 admission 才升 active；升级前不写 trades
   // (避免未过安全打分的币污染 trades 表)。仅 discoverFromPools 链走此分支。
   if (cand.status === 'seen') {
-    if (chainConfig(sw.chain).discoverFromPools) await promoteFromPool(sw.chain, key, cand);
+    if (chainConfig(sw.chain).discoverFromPools) {
+      store.touchLastTrade(key, sw.ts); // 刷新最后成交时刻 → 有量的 seen 池不被新建空池挤出 500 上限
+      await promoteFromPool(sw.chain, key, cand);
+    }
     return;
   }
   if (cand.status !== 'active') return;
@@ -230,6 +233,7 @@ async function onSwap(sw) {
     price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null, block: sw.block ?? null,
   });
   if (isBuy && sw.account) store.addBuyer(key, sw.account, sw.ts);
+  if (chainConfig(sw.chain).discoverFromPools) store.touchLastTrade(key, sw.ts); // active 池同刷，有量的池排序靠前不被挤出
   recordTradeWrite();
 }
 
@@ -635,10 +639,17 @@ async function backfillPonsLaunches(chain, hours = 2) {
 }
 
 export function startEngine() {
-  // 毕业池集合变化（新毕业 / 归档）时重建 Swap 订阅（V2/V3 + v4 各一条）
+  // 毕业池集合变化（新毕业 / 归档）时重建 Swap 订阅（V2/V3 + v4 各一条）。
+  // 去抖 3s：Arc pool-first 首日一小时可能几百个新池，每池一次 POOLS_CHANGED；不去抖=几百次全量退订/重订。
+  // 合并成每链每 3s 最多一次重建。启动时的 rebuild 走下方直接调用，不受此去抖影响。
+  const rebuildTimers = new Map(); // chain -> timer
   bus.on(Events.POOLS_CHANGED, ({ chain }) => {
-    try { rebuildSwaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildSwaps'); }
-    try { rebuildV4Swaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildV4Swaps'); }
+    clearTimeout(rebuildTimers.get(chain));
+    rebuildTimers.set(chain, setTimeout(() => {
+      rebuildTimers.delete(chain);
+      try { rebuildSwaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildSwaps'); }
+      try { rebuildV4Swaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildV4Swaps'); }
+    }, 3000));
   });
 
   // Pons：从 DB 回灌 curve↔token 映射（重启后实时曲线成交才能按 emitter 反查归属）。
