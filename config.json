@@ -102,31 +102,56 @@
       ]
     },
     "arc": {
-      "chainId": 5042002,
+      "chainId": 5042,
       "goplusId": "",
-      "name": "Arc Testnet",
+      "name": "Arc",
       "nativeSymbol": "USDC",
-      "swapRouterV3": "0x509cF58CdA08C7aee83a2BdBb4A1Eac907343D01",
+      "multicall3": "0xcA11bde05977b3631167028862bE2a173976CA11",
+      "swapRouterV3": "0x0000000000000000000000000000000000000000",
       "routerKind": "v3-router-v1",
-      "quoterV3": "0x121aeB6DEf00F6F67665008CaC1C19805886ed1a",
+      "quoterV3": "0x0000000000000000000000000000000000000000",
+      "poolManagerV4": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
       "wrappedNative": "0x0000000000000000000000000000000000000000",
-      "explorer": "https://testnet.arcscan.app",
+      "explorer": "https://arcscan.app",
       "gmgnBase": "",
       "secPerBlockFallback": 0.5,
+      "nativeUsdFallback": 1,
       "wbnbUsdPriceFallback": 1,
-      "allowUnverifiedStrong": false,
+      "discoverFromPools": true,
+      "admission": 3,
+      "allowUnverifiedStrong": { "until": "2026-09-23" },
+      "tiers": {
+        "T1": { "marketCapUsd": 20000 },
+        "T2": { "marketCapUsd": 100000, "minLiquidityUsd": 10000, "momentumMinNetInUsd": 500 }
+      },
+      "narrativeKeywords": ["Arc", "Circle", "USDC", "stock", "TSLA", "NVDA", "SPY", "HIMS", "AI", "ETF", "RWA"],
       "quoteTokens": {
-        "USDC": { "address": "0x3600000000000000000000000000000000000000", "decimals": 6, "native": true },
-        "WUSDC": { "address": "0x911b4000D3422F482F4062a913885f7b035382Df", "decimals": 18 }
+        "USDC": { "address": "0x3600000000000000000000000000000000000000", "decimals": 6, "native": true }
       },
       "launchpads": [
         {
           "id": "arc-uniV3",
           "type": "amm-v3",
-          "label": "UnitFlowV3 (Arc Testnet)",
-          "address": "0xAb6A8AAb7d490007634ef59d424b5d89688a1971",
+          "label": "Uniswap V3 (Arc)",
+          "address": "0x0000000000000000000000000000000000000000",
           "event": "event PoolCreated(address indexed token0, address indexed token1, uint24 indexed fee, int24 tickSpacing, address pool)",
-          "note": "Arc 测试网 V3 兼容 AMM(UnitFlowV3，ACTFUN 配套第三方部署，仅演练；主网非此地址)。路由是 SwapRouter v1 形态(exactInputSingle 带 deadline，selector 0x414bf389)→ routerKind=v3-router-v1。报价币 USDC(0x3600…) 是原生余额的 ERC-20 视图(6位)，往返走 checkV3Erc20 + 覆写原生余额(无需槽探测)；WUSDC(0x911b…,18位)是第三方包装，若池按 WUSDC 计价另配。主网 9/16 后大概率是 Uniswap v4(PoolManager 0x8366…)，需 v4 适配器，测试网无 v4 可测(靶场在 Robinhood Chain)。"
+          "note": "Arc 主网 Uniswap V3 工厂占位：明天填真实地址(getCode 核验)。零地址=跳过订阅并 warn，不拒绝启动。报价币 USDC(0x3600…) 是原生余额的 ERC-20 视图(6位)，往返走 checkV3Erc20+覆写原生余额，routerKind=v3-router-v1(swapRouterV3/quoterV3 明天填)。"
+        },
+        {
+          "id": "arc-uniV2",
+          "type": "amm-v2",
+          "label": "Uniswap V2 (Arc)",
+          "address": "0x0000000000000000000000000000000000000000",
+          "event": "event PairCreated(address indexed token0, address indexed token1, address pair, uint256)",
+          "note": "Arc 主网 V2 工厂占位：明天核实后填。零地址=跳过并 warn。"
+        },
+        {
+          "id": "arc-aerodrome",
+          "type": "amm-aerodrome",
+          "label": "Aerodrome (Arc)",
+          "address": "0x0000000000000000000000000000000000000000",
+          "event": "event PoolCreated(address indexed token0, address indexed token1, bool indexed stable, address pool, uint256)",
+          "note": "Aerodrome(Solidly 分叉)工厂占位：明天核实后填。零地址=跳过并 warn。适配器(储备定价+往返 unsupported→豁免)在拿到真实工厂地址后接入(见 discover/onAmm 的 amm-aerodrome 分支)。"
         }
       ]
     },

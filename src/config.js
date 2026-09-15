@@ -74,3 +74,10 @@ export function allowUnverifiedStrongFor(chain) {
   if (a.until) return Date.now() < Date.parse(a.until);
   return true;
 }
+
+// 升级为 active 所需独立买家数：链级 chains.<chain>.admission 覆盖全局 admission.minBuyersToActivate。
+// Arc pool-first 币毕业即建池、成交经 Swap 计数，门槛可略低(3)以尽早纳入跟踪；BSC/Robinhood 维持全局默认。
+export function admissionFor(chain) {
+  const c = chain ? config.chains?.[chain]?.admission : null;
+  return c ?? config.admission?.minBuyersToActivate ?? 5;
+}

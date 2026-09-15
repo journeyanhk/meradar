@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { join } from 'node:path';
-import { ROOT, config } from './config.js';
+import { ROOT, config, chainConfig } from './config.js';
 import { store } from './db.js';
 import { bus, Events } from './bus.js';
 import { linksFor } from './alert.js';
@@ -32,6 +32,18 @@ function farmDistribution() {
     };
   }
   farmDistCache = { at: Date.now(), data: out };
+  return out;
+}
+
+// pool-first 链(Arc)首日反推发射台：把最近 24h 建池交易的 from(部署者)/to(被调用合约) Top10 输出到 /api/health，
+// 用于反查 Tolly/Arcpad/RadarDEX 等发射台合约地址。仅对 discoverFromPools 链输出，其它链为空对象。
+function poolCreatorsSection() {
+  const out = {};
+  const since = Date.now() - 24 * 3600 * 1000;
+  for (const chain of config.enabledChains) {
+    if (!chainConfig(chain).discoverFromPools) continue;
+    out[chain] = store.poolCreators24h(chain, since);
+  }
   return out;
 }
 
@@ -89,6 +101,7 @@ export async function startServer() {
     rpcCapabilities: rpcCapabilities(),
     template: templateHealth(), // { promoted24h, templateUnknownRate, learned } —— 未知率>5% 提示模板轮换
     buyerGrading: farmDistribution(), // 每链 tokens_bought_24h 分位(50/90/99/max) + farm 命中数，供一周后定阈值
+    poolCreators24h: poolCreatorsSection(), // pool-first 链(Arc)首日反推发射台：建池者/被调合约 Top10
     time: Date.now(),
   }));
 

@@ -5,7 +5,8 @@ import { fourMemeEvents } from '../src/abi.js';
 import { evaluateTier } from '../src/alert.js';
 import { classifyTradeSafety } from '../src/score.js';
 import { resolveQuote } from '../src/enrich.js';
-import { normalizeSwap } from '../src/discover.js';
+import { normalizeSwap, pickToken } from '../src/discover.js';
+import { admissionFor } from '../src/config.js';
 import * as momentum from '../src/momentum.js';
 import { graduatedByCurve } from '../src/pool.js';
 import { goplusCheck } from '../src/goplus.js';
@@ -1025,4 +1026,56 @@ test('M3-1b poolState：缺 sqrtPriceX96/liquidity 不写入（不覆盖旧值�
   forgetPoolState('c', '0xp');
   recordPoolState('c', '0xp', { sqrtPriceX96: null, liquidity: 5n });
   assert.equal(getPoolState('c', '0xp', 1e9), null);
+});
+
+// —— Arc pool-first ——
+
+test('admissionFor：Arc 链级覆盖为 3，其它链回落全局默认', () => {
+  assert.equal(admissionFor('arc'), 3, 'arc 用链级 admission=3');
+  assert.equal(admissionFor('bsc'), 5, 'bsc 无链级覆盖 → 全局默认 5');
+  assert.equal(admissionFor(null), 5, '无链名 → 全局默认 5');
+});
+
+test('pickToken：恰一侧是报价币 → matched，未登记方即 meme', () => {
+  const quote = '0x3600000000000000000000000000000000000000'; // arc USDC
+  const meme = '0xabcdef0000000000000000000000000000000001';
+  // quote 为 token0
+  let r = pickToken(quote, meme, new Set([quote]));
+  assert.equal(r.matched, true);
+  assert.equal(r.token.toLowerCase(), meme);
+  assert.equal(r.quote.toLowerCase(), quote);
+  // quote 为 token1（排序相反）
+  r = pickToken(meme, quote, new Set([quote]));
+  assert.equal(r.matched, true);
+  assert.equal(r.token.toLowerCase(), meme);
+  assert.equal(r.quote.toLowerCase(), quote);
+});
+
+test('pickToken：两侧都非报价币 / 都是报价币 → 不 matched(无法判定)', () => {
+  const a = '0xaaaa000000000000000000000000000000000001';
+  const b = '0xbbbb000000000000000000000000000000000002';
+  const q1 = '0x3600000000000000000000000000000000000000';
+  const q2 = '0x3600000000000000000000000000000000000001';
+  assert.equal(pickToken(a, b, new Set([q1])).matched, false, '都非报价币');
+  assert.equal(pickToken(q1, q2, new Set([q1, q2])).matched, false, '都是报价币');
+});
+
+test('Arc 毕业池 v4/Aerodrome 无往返(unsupported) + 收紧豁免 → 放行强提示标未核验(不封 T1)', () => {
+  const r = classifyTradeSafety({
+    graduated: true, roundTrip: { status: 'unsupported' },
+    goplus: null, allowUnverifiedStrong: true,
+  });
+  assert.equal(r.state, 'WAIT');
+  assert.equal(r.source, 'unverified');
+  assert.equal(r.capTier, null, '未核验路径不封顶到 T1');
+  assert.deepEqual(r.softFlags, ['未核验路径']);
+});
+
+test('未开豁免的链：毕业后无往返 → 回落 WAIT/T1(安全默认)', () => {
+  const r = classifyTradeSafety({
+    graduated: true, roundTrip: { status: 'unsupported' },
+    goplus: null, allowUnverifiedStrong: false,
+  });
+  assert.equal(r.state, 'WAIT');
+  assert.equal(r.capTier, 'T1', '无豁免 → 封顶 T1');
 });

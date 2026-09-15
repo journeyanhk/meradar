@@ -25,12 +25,12 @@ export function seedPonsCurves(rows) {
   return n;
 }
 
-function pickToken(token0, token1, quoteSet) {
+export function pickToken(token0, token1, quoteSet) {
   const t0 = token0.toLowerCase();
   const t1 = token1.toLowerCase();
-  if (quoteSet.has(t0) && !quoteSet.has(t1)) return { token: token1, quote: token0 };
-  if (quoteSet.has(t1) && !quoteSet.has(t0)) return { token: token0, quote: token1 };
-  return { token: token0, quote: token1 };
+  if (quoteSet.has(t0) && !quoteSet.has(t1)) return { token: token1, quote: token0, matched: true };
+  if (quoteSet.has(t1) && !quoteSet.has(t0)) return { token: token0, quote: token1, matched: true };
+  return { token: token0, quote: token1, matched: false };
 }
 
 /**
@@ -91,10 +91,10 @@ export function watchChain(chain, handlers) {
               const a = l.args || {};
               if (!a.token0 || !a.token1) continue;
               const poolAddr = a.pool || a.pair;
-              const { token, quote } = pickToken(a.token0, a.token1, quoteSet);
+              const { token, quote, matched } = pickToken(a.token0, a.token1, quoteSet);
               handlers.onAmm?.({
                 chain, address: token, launchpad: lp.id, label: lp.label,
-                pool: poolAddr, poolType, quote, graduated: lp.id.startsWith('pancake'),
+                pool: poolAddr, poolType, quote, quoteMatched: matched, graduated: lp.id.startsWith('pancake'),
                 tx: l.transactionHash, block: Number(l.blockNumber || 0),
               });
             } catch (e) { log.debug({ err: e.message }, 'amm log 解析失败'); }

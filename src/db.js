@@ -169,6 +169,19 @@ CREATE TABLE IF NOT EXISTS buyer_profiles (
 -- farm 统计走 account 索引；buyers 表 first_ts 窗口过滤 + account 分组的跨币 COUNT(DISTINCT key)。
 CREATE INDEX IF NOT EXISTS idx_buyers_account ON buyers(account);
 CREATE INDEX IF NOT EXISTS idx_buyers_first_ts ON buyers(first_ts);
+
+-- 建池者聚合（Arc pool-first）：每发现一个 pool-first 新币，记一次建池交易的 from(部署者)与 to(被调用合约=launcher/router)。
+-- 主网首日靠 /api/health.<chain>.poolCreators24h 的 Top10 反推 Tolly/Arcpad/RadarDEX 等发射台合约地址。
+CREATE TABLE IF NOT EXISTS pool_creators (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  chain    TEXT NOT NULL,
+  ts       INTEGER NOT NULL,
+  creator  TEXT,               -- tx.from(部署者)
+  contract TEXT,               -- tx.to(被调用合约=发射台/路由)
+  pool     TEXT,
+  tx       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_poolcreators_chain_ts ON pool_creators(chain, ts);
 `);
 
 // 幂等迁移：node:sqlite 错误信息少，用 PRAGMA table_info 判断列是否存在再 ADD COLUMN，
@@ -298,6 +311,13 @@ const stmt = {
   insertBuyer: db.prepare(`INSERT OR IGNORE INTO buyers (key, account, first_ts) VALUES (@key, @account, @first_ts)`),
   buyersForKey: db.prepare(`SELECT account FROM buyers WHERE key=?`),
   swapPools: db.prepare(`SELECT key, chain, address, decimals, pool, pool_type, quote_symbol FROM candidates WHERE status='active' AND pool IS NOT NULL`),
+  // 某链的成交订阅池集合：默认仅 active（BSC/Robinhood）。discoverFromPools 链(Arc)额外含 seen——
+  // pool-first 币登记即建池、需订阅 Swap 计买家才能升 active；按毕业时刻倒序取近 500，防订阅量失控。
+  swapPoolsByChain: db.prepare(`SELECT key, chain, address, decimals, pool, pool_type, quote_symbol FROM candidates WHERE chain=? AND status='active' AND pool IS NOT NULL`),
+  swapPoolsByChainInclSeen: db.prepare(`SELECT key, chain, address, decimals, pool, pool_type, quote_symbol FROM candidates WHERE chain=? AND status IN ('active','seen') AND pool IS NOT NULL ORDER BY COALESCE(graduated_at, discovered_at) DESC LIMIT 500`),
+  addPoolCreator: db.prepare(`INSERT INTO pool_creators (chain, ts, creator, contract, pool, tx) VALUES (@chain, @ts, @creator, @contract, @pool, @tx)`),
+  poolCreatorsByCreator: db.prepare(`SELECT creator AS id, COUNT(*) AS n FROM pool_creators WHERE chain=? AND ts>=? AND creator IS NOT NULL GROUP BY creator ORDER BY n DESC LIMIT 10`),
+  poolCreatorsByContract: db.prepare(`SELECT contract AS id, COUNT(*) AS n FROM pool_creators WHERE chain=? AND ts>=? AND contract IS NOT NULL GROUP BY contract ORDER BY n DESC LIMIT 10`),
   bumpTemplateHash: db.prepare(`INSERT INTO template_hashes (chain, hash, kind, first_seen, count) VALUES (@chain, @hash, @kind, @ts, 1) ON CONFLICT(chain, hash) DO UPDATE SET count = count + 1`),
   getTemplateHashCount: db.prepare(`SELECT count FROM template_hashes WHERE chain=? AND hash=?`),
   learnedTemplateHashes: db.prepare(`SELECT hash FROM template_hashes WHERE chain=? AND count>=?`),
@@ -456,6 +476,16 @@ export const store = {
   },
   buyers(key) { return stmt.buyersForKey.all(key).map((r) => r.account); },
   swapPools() { return stmt.swapPools.all(); },
+  // 某链的成交订阅池：discoverFromPools 链含 seen(pool-first)，否则仅 active。
+  swapPoolsFor(chain, inclSeen = false) {
+    return inclSeen ? stmt.swapPoolsByChainInclSeen.all(chain) : stmt.swapPoolsByChain.all(chain);
+  },
+  addPoolCreator({ chain, ts = Date.now(), creator = null, contract = null, pool = null, tx = null }) {
+    stmt.addPoolCreator.run({ chain, ts, creator, contract, pool, tx });
+  },
+  poolCreators24h(chain, since) {
+    return { byCreator: stmt.poolCreatorsByCreator.all(chain, since), byContract: stmt.poolCreatorsByContract.all(chain, since) };
+  },
   // 模板哈希自学习：累计频次并返回最新 count；查已达阈值的哈希（供 template.js 白名单合并）。
   bumpTemplateHash(chain, hash, kind) {
     const h = String(hash).toLowerCase();

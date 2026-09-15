@@ -2,7 +2,7 @@ import { watchChain, resubscribeSwaps, resubscribeV4Swaps, registerPonsCurve, se
 import { readToken, quoteUsd, resolveQuote, readTokenInfo } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { store } from './db.js';
-import { config, chainConfig } from './config.js';
+import { config, chainConfig, admissionFor } from './config.js';
 import { httpClient, getSecPerBlock, estimateTsFromBlock } from './chain.js';
 import { fourMemeEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents } from './abi.js';
 import { bus, Events } from './bus.js';
@@ -204,13 +204,22 @@ async function onTrade(t) {
 async function onSwap(sw) {
   const key = `${sw.chain}:${sw.address.toLowerCase()}`;
   const cand = store.get(key);
-  if (!cand || cand.status !== 'active') return;
+  if (!cand) return;
   // 事件驱动定价：v4 Swap 自带 sqrtPriceX96+liquidity → 写 poolState，track 本轮直接据此算价、跳过 extsload。
+  // 对 seen/active 都写(价格随时可算)。
   if (sw.poolType === 'v4' && sw.pool && sw.sqrtPriceX96 != null && sw.liquidity != null) {
     recordPoolState(sw.chain, sw.pool, { sqrtPriceX96: sw.sqrtPriceX96, liquidity: sw.liquidity, tick: sw.tick, ts: sw.ts });
   }
   const isBuy = sw.side === 'buy';
   momentum.onTrade({ token: sw.address, account: isBuy ? sw.account : null, isBuy, ts: sw.ts });
+
+  // Arc pool-first：seen 币的池成交只喂动量计买家，达 admission 才升 active；升级前不写 trades
+  // (避免未过安全打分的币污染 trades 表)。仅 discoverFromPools 链走此分支。
+  if (cand.status === 'seen') {
+    if (chainConfig(sw.chain).discoverFromPools) await promoteFromPool(sw.chain, key, cand);
+    return;
+  }
+  if (cand.status !== 'active') return;
   const qp = quoteUsd(sw.chain, sw.quoteSym); // 动态报价币不可信/未定价时为 null
   const usd = qp != null ? (sw.quoteHuman || 0) * qp : 0;
   const price = sw.tokenHuman > 0 ? usd / sw.tokenHuman : 0;
@@ -222,6 +231,67 @@ async function onSwap(sw) {
   });
   if (isBuy && sw.account) store.addBuyer(key, sw.account, sw.ts);
   recordTradeWrite();
+}
+
+// —— Arc pool-first：从「新建池」登记新币 + 升级 ——
+// discoverFromPools 链上，一侧是已知报价币、另一侧未登记 → 未登记方即新 meme，登记为 seen 且「已毕业」态
+// (有池即毕业)。graduated_at 用建池块时间近似(供新鲜度门)。不跑曲线/模板分支(cand.pool 已设 → track 天然跳过)。
+async function registerSeenFromPool({ chain, address, launchpad, block }) {
+  const key = `${chain}:${address.toLowerCase()}`;
+  if (store.get(key)) return true;
+  const meta = await readToken(chain, address).catch(() => null);
+  if (!meta) return false; // 非 ERC20 / 读取失败 → 忽略噪声
+  const now = Date.now();
+  const gradTs = block ? estimateTsFromBlock(chain, block) : now;
+  const inserted = store.addCandidate({
+    key, chain, address, launchpad: launchpad || 'pool',
+    name: (meta.name || '').slice(0, 80) || null,
+    symbol: (meta.symbol || '').slice(0, 32) || null,
+    decimals: meta.decimals ?? 18,
+    total_supply: meta.totalSupply?.toString() ?? null, creator: null,
+    pool: null, pool_type: null, quote_symbol: null,
+    launch_time: gradTs, status: 'seen', discovered_at: now, updated_at: now,
+  });
+  if (inserted) { recordSeen(); store.markGraduated(key, gradTs); } // 有池=已毕业；graduated_at=建池块时间
+  return !!store.get(key);
+}
+
+// 记录建池者(Arc pool-first)：拉一次建池交易的 from(部署者)/to(被调用合约=发射台)，供 poolCreators24h 反推发射台合约。
+// 每币一次(发现时)，非每笔成交，成本可忽略；失败静默。
+async function recordPoolCreator(chain, { tx, pool }) {
+  if (!tx) return;
+  try {
+    const t = await httpClient(chain).getTransaction({ hash: tx });
+    store.addPoolCreator({
+      chain, ts: Date.now(),
+      creator: (t?.from || '').toLowerCase() || null,
+      contract: (t?.to || '').toLowerCase() || null,
+      pool: pool || null, tx,
+    });
+  } catch { /* 拿不到交易 → 跳过 */ }
+}
+
+// pool-first 币升级：seen 池成交经 momentum 计买家，达 admission 升 active。
+// 无 Token Manager/曲线：不读 tokenInfo、不读曲线；走仿盘归属 + 安全打分(毕业后往返/收紧豁免)。
+async function promoteFromPool(chain, key, cand) {
+  if (momentum.buyerCount(cand.address) < admissionFor(chain)) return;
+  if (!store.promote(key)) return;
+  recordPromoted();
+  for (const acc of momentum.buyers(cand.address)) store.addBuyer(key, acc, 0);
+  const fresh = store.get(key);
+  if (fresh.symbol) {
+    const earliest = store.earliestSameSymbol(chain, fresh.symbol);
+    if (earliest && earliest.key !== key) store.setCopyOf(key, earliest.key);
+  }
+  const s = await scoreCandidate(chain, fresh).catch((e) => { log.debug({ err: e.message }, 'scoreCandidate(pool-first)'); return { veto: false, checks: {} }; });
+  store.setSafety(key, s.checks);
+  if (s.veto) {
+    store.setStatus(key, 'rejected', s.reason);
+    bus.emit(Events.UPDATE, { ...store.get(key) });
+    return;
+  }
+  bus.emit(Events.CANDIDATE, { ...store.get(key) });
+  log.info({ chain, symbol: fresh.symbol, buyers: momentum.buyerCount(cand.address) }, 'pool-first 候选升级为 active');
 }
 
 // promote 时反查池子（逻辑已抽到 src/pool.js，engine 与 track 共用）
@@ -288,8 +358,15 @@ async function onV4Initialize(i) {
   else return;
   if (!meme || /^0x0+$/.test(meme)) return;
   const key = `${i.chain}:${meme}`;
-  const cand = store.get(key);
-  if (!cand) return; // 未跟踪代币 → 不登记(避免为全网 v4 池落库)
+  let cand = store.get(key);
+  if (!cand) {
+    // pool-first 链(Arc)：v4 新池的非报价币一侧即新 meme，登记为 seen·已毕业；否则(BSC/Robinhood)不为全网 v4 池落库。
+    if (!cfg.discoverFromPools) return;
+    if (!(await registerSeenFromPool({ chain: i.chain, address: meme, launchpad: 'arc-uniV4', block: i.block }))) return;
+    recordPoolCreator(i.chain, { tx: i.tx, pool: i.poolId }).catch(() => {});
+    cand = store.get(key);
+    if (!cand) return;
+  }
   if (store.v4PoolByToken(i.chain, meme)) return; // PoolRegistered 已登记为主源 → 让主源优先，早退
   store.upsertV4Pool({
     chain: i.chain, pool_id: i.poolId, token: meme, quote,
@@ -305,13 +382,27 @@ async function onV4Initialize(i) {
 }
 
 // AMM 建池 / 毕业：补池子地址与类型，供 track 定价，并重建成交订阅。
+// discoverFromPools 链(Arc)：未登记的新对且恰有一侧是已知报价币 → pool-first 登记为新币(seen·已毕业)。
 async function onAmm(c) {
   const key = `${c.chain}:${c.address.toLowerCase()}`;
+  const cfg = chainConfig(c.chain);
   const existing = store.get(key);
-  if (!existing) return; // 未登记的 AMM 新对不追（噪声太多，只关心已发现的曲线币毕业）
+  if (!existing) {
+    // 非 pool-first 链：未登记的 AMM 新对不追（噪声太多，只关心已发现的曲线币毕业）。
+    // pool-first 链：仅当恰有一侧是已知报价币时登记（两侧都非报价币=忽略）。
+    if (!cfg.discoverFromPools || !c.quoteMatched) return;
+    if (!(await registerSeenFromPool({ chain: c.chain, address: c.address, launchpad: c.launchpad, block: c.block }))) return;
+    const q = resolveQuote(cfg, c.quote);
+    store.setPool(key, c.pool, c.poolType, q?.sym ?? null);
+    recordPoolCreator(c.chain, { tx: c.tx, pool: c.pool }).catch(() => {});
+    bus.emit(Events.POOLS_CHANGED, { chain: c.chain });
+    bus.emit(Events.UPDATE, { ...store.get(key) });
+    log.info({ chain: c.chain, symbol: store.get(key)?.symbol, pool: c.pool, poolType: c.poolType }, 'pool-first 登记新币(seen·已毕业)');
+    return;
+  }
   if (existing.pool) return;
   // quote_symbol 统一存符号：PairCreated 给的是地址，先解析成符号再落库
-  const q = resolveQuote(chainConfig(c.chain), c.quote);
+  const q = resolveQuote(cfg, c.quote);
   store.setPool(key, c.pool, c.poolType, q?.sym ?? null);
   log.info({ token: existing.symbol, pool: c.pool }, '候选建池/毕业，已补池子');
   bus.emit(Events.POOLS_CHANGED, { chain: c.chain });
@@ -323,8 +414,8 @@ async function onAmm(c) {
 const swapUnwatch = new Map(); // chain -> unwatch
 function rebuildSwaps(chain) {
   const cfg = chainConfig(chain);
-  const pools = store.swapPools()
-    .filter((r) => r.chain === chain && r.pool && r.pool_type !== 'v4')
+  const pools = store.swapPoolsFor(chain, !!cfg.discoverFromPools)
+    .filter((r) => r.pool && r.pool_type !== 'v4')
     .map((r) => {
       // resolveQuote 同时吃符号和历史遗留的地址值，两种存法都能解析
       const q = resolveQuote(cfg, r.quote_symbol) || {};
@@ -350,7 +441,7 @@ function rebuildV4Swaps(chain) {
   const pm = cfg.poolManagerV4;
   if (!pm || /^0x0+$/.test(pm)) return;
   const pools = [];
-  for (const r of store.swapPools().filter((r) => r.chain === chain && r.pool && r.pool_type === 'v4')) {
+  for (const r of store.swapPoolsFor(chain, !!cfg.discoverFromPools).filter((r) => r.pool && r.pool_type === 'v4')) {
     const vp = store.v4PoolById(chain, r.pool) || store.v4PoolByToken(chain, r.address);
     if (!vp) continue;
     const q = resolveQuote(cfg, r.quote_symbol) || {};
