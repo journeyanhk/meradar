@@ -107,6 +107,8 @@ function cardHtml(d) {
   if (d.graduated) badges.push('<span class="badge grad">毕业</span>');
   // M3-1b 价格新鲜度/撤池状态：撤池(真归零) > 价格未知(>24h) > 陈旧(>10min)，只显最严重一档。
   if (d.liquidityWithdrawn) badges.push('<span class="badge withdrawn">已撤池</span>');
+  else if (d.priceState === 'implausible') badges.push('<span class="badge implausible">数据异常·已隐藏</span>');
+  else if (d.softFlags && d.softFlags.unpriced) badges.push(`<span class="badge unpriced">报价币${d.quoteSymbol ? ' ' + esc(d.quoteSymbol) : ''}·无美元价</span>`);
   else if (d.priceUnknown) badges.push('<span class="badge unknown">价格未知</span>');
   else if (d.priceStale) badges.push(`<span class="badge stale">更新于${ago(d.priceUpdatedAt)}前</span>`);
   if (d.softFlags && d.softFlags.noActiveLiquidity) badges.push('<span class="badge noliq">当前价位无流动性</span>');

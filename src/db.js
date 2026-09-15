@@ -198,6 +198,9 @@ ensureColumns('candidates', [
   // 绝不把市值写 0(4FOUR/币安镇长两次「归零」根因)。source ∈ curve|amm-v2|amm-v3|amm-v4|external。
   ['price_source', 'price_source TEXT'],
   ['price_updated_at', 'price_updated_at INTEGER'],
+  // 价格状态：ok|stale|unknown|withdrawn|implausible。implausible=合理性钳位命中(报价币单位错误)，
+  // 卡片显示「数据异常·已隐藏」而非 $0，与真归零/未定价区分。
+  ['price_state', 'price_state TEXT'],
 ]);
 // trades 已有 price(成交时单价 USD)=price_at_trade，无需重复列；只补 mcap_at_trade：
 // 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
@@ -240,7 +243,7 @@ const stmt = {
       depth_usd=@depth_usd, depth_kind=@depth_kind, offers_pct=@offers_pct,
       net_in_30m=@net_in_30m, net_in_1h=@net_in_1h, max_buy_10m=@max_buy_10m,
       buy_ratio_30m=@buy_ratio_30m, new_buyers_30m=@new_buyers_30m, curve_progress_pct=@curve_progress_pct,
-      price_source=@price_source, price_updated_at=@price_updated_at,
+      price_source=@price_source, price_updated_at=@price_updated_at, price_state=@price_state,
       updated_at=@updated_at WHERE key=@key
   `),
   updatePeak: db.prepare(`UPDATE candidates SET peak_mcap_usd=MAX(peak_mcap_usd, @mcap) WHERE key=@key`),
@@ -370,7 +373,7 @@ export const store = {
       key, updated_at: Date.now(),
       volume_usd: 0, depth_usd: 0, depth_kind: 'curve', offers_pct: 0,
       net_in_30m: 0, net_in_1h: 0, max_buy_10m: 0, buy_ratio_30m: 0, new_buyers_30m: 0, curve_progress_pct: 0,
-      price_source: null, price_updated_at: null,
+      price_source: null, price_updated_at: null, price_state: null,
       ...m,
     });
   },

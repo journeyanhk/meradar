@@ -58,6 +58,7 @@ function decorate(c) {
     liquidityUsd: c.liquidity_usd, priceUsd: c.price_usd, marketCapUsd: c.market_cap_usd,
     priceSource: c.price_source || null,
     priceUpdatedAt: c.price_updated_at || null,
+    priceState: c.price_state || null,
     priceStale: c.price_updated_at ? (Date.now() - c.price_updated_at) > PRICE_STALE_MS : false,
     priceUnknown: c.price_updated_at ? (Date.now() - c.price_updated_at) > PRICE_UNKNOWN_MS : false,
     liquidityWithdrawn: !!(c.graduated && c.pool && (c.price_usd || 0) === 0 && (c.depth_usd || 0) === 0),

@@ -13,6 +13,19 @@
 export const PRICE_STALE_MS = 10 * 60_000;       // 距上次成功更新 >10min → stale(卡片灰标)
 export const PRICE_UNKNOWN_MS = 24 * 3600_000;   // >24h 未更新 → 价格「未知」
 
+// —— 合理性钳位（$MUMO 教训）——
+// 报价币是代币化股票(MU/TSLA…)且无美元价来源时，某条历史路径曾把 quoteUsd 填成 10^17 量级常量/残留值，
+// 导致市值 $1.7e20、深度 $1.8e18 这类离谱数字，并经 keepOld/peak 被保留。加一道单位错误通用护栏：
+// 价格>$1e6、市值>$10 亿、或深度>市值×100(两腿被不同倍数放大) → 判 implausible，数值归零、不入 prev/peak。
+export const IMPLAUSIBLE_PRICE_USD = 1e6;
+export const IMPLAUSIBLE_MCAP_USD = 1e9;
+export function isImplausibleUsd({ priceUsd = 0, marketCapUsd = 0, depthUsd = 0 } = {}) {
+  if (priceUsd > IMPLAUSIBLE_PRICE_USD) return true;
+  if (marketCapUsd > IMPLAUSIBLE_MCAP_USD) return true;
+  if (marketCapUsd > 0 && depthUsd > marketCapUsd * 100) return true;
+  return false;
+}
+
 // pool_type(v2/v3/v4) → priceOf 来源名。
 export function sourceOf(poolType) {
   if (poolType === 'v4') return 'amm-v4';
@@ -38,6 +51,15 @@ function stateFromAge(now, at) {
  *          数值字段恒为 number(不返回 null，保护下游数学与 peak MAX)；unknown 时保旧值但 state 标出。
  */
 export function resolvePrice({ now = Date.now(), hasPool, poolType, poolM, curve, prev } = {}) {
+  const r = resolvePriceInner({ now, hasPool, poolType, poolM, curve, prev });
+  // 写库前最后一道：单位错误/污染残留一律归零，绝不让离谱数字进卡片、prev 或 peak。
+  if (r.state !== 'implausible' && isImplausibleUsd(r)) {
+    return { priceUsd: 0, depthUsd: 0, marketCapUsd: 0, source: r.source, updatedAt: now, stale: false, state: 'implausible' };
+  }
+  return r;
+}
+
+function resolvePriceInner({ now = Date.now(), hasPool, poolType, poolM, curve, prev } = {}) {
   const prevPrice = prev?.price_usd || 0;
   const prevMcap = prev?.market_cap_usd || 0;
   const prevDepth = prev?.depth_usd || 0;

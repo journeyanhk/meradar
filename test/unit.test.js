@@ -10,7 +10,7 @@ import * as momentum from '../src/momentum.js';
 import { graduatedByCurve } from '../src/pool.js';
 import { goplusCheck } from '../src/goplus.js';
 import { classifyAccount, classifyTokenBuyers, taxPositive, BUYER_DEFAULTS } from '../src/buyer.js';
-import { resolvePrice, sourceOf, PRICE_STALE_MS, PRICE_UNKNOWN_MS } from '../src/price.js';
+import { resolvePrice, sourceOf, PRICE_STALE_MS, PRICE_UNKNOWN_MS, isImplausibleUsd } from '../src/price.js';
 import { isFullRangePool } from '../src/enrich.js';
 import { recordPoolState, getPoolState, forgetPoolState } from '../src/poolstate.js';
 
@@ -967,6 +967,34 @@ test('M3-1b resolvePrice：v4 集中池当前 tick 无流动性(noActiveLiquidit
   assert.equal(px.depthUsd, 8000);
   assert.notEqual(px.state, 'withdrawn', '不误判为撤池');
   assert.equal(px.state, 'ok');
+});
+
+// —— $MUMO 教训：合理性钳位（报价币无美元价却被填单位错误常量/残留值）——
+test('钳位 isImplausibleUsd：价格>$1e6 / 市值>$10 亿 / 深度>市值×100 判离谱；正常值放行', () => {
+  assert.equal(isImplausibleUsd({ priceUsd: 2e6 }), true, '价格>$1e6');
+  assert.equal(isImplausibleUsd({ marketCapUsd: 1.7e20 }), true, '市值>$10 亿($MUMO)');
+  assert.equal(isImplausibleUsd({ marketCapUsd: 1000, depthUsd: 2e5 }), true, '深度>市值×100(单腿单位错)');
+  assert.equal(isImplausibleUsd({ priceUsd: 0.002, marketCapUsd: 200000, depthUsd: 5000 }), false, '正常曲线币放行');
+  assert.equal(isImplausibleUsd({ marketCapUsd: 0, depthUsd: 0 }), false, '未定价全 0 放行(不误判)');
+});
+
+test('钳位 resolvePrice：毕业池算出离谱市值($MUMO) → 归零 + state=implausible，不入 prev/peak', () => {
+  const now = 11_000_000;
+  const poolM = { priceUsd: 3.6e12, liquidityUsd: 1.8e18, marketCapUsd: 1.7e20, priced: true, drained: false };
+  const px = resolvePrice({ now, hasPool: true, poolType: 'v4', poolM, curve: null, prev: null });
+  assert.equal(px.state, 'implausible');
+  assert.equal(px.priceUsd, 0);
+  assert.equal(px.marketCapUsd, 0);
+  assert.equal(px.depthUsd, 0);
+  assert.equal(px.source, 'amm-v4', '来源仍标注，便于诊断');
+});
+
+test('钳位 resolvePrice：上一轮污染的巨值经 keepOld 也被钳位（读失败仍归零，防残留传染）', () => {
+  const now = 12_000_000;
+  const prev = { price_usd: 3.6e12, market_cap_usd: 1.7e20, depth_usd: 1.8e18, price_source: 'amm-v4', price_updated_at: now - 30_000 };
+  const px = resolvePrice({ now, hasPool: true, poolType: 'v4', poolM: null, curve: null, prev });
+  assert.equal(px.state, 'implausible', 'keepOld 保出的巨值同样被钳位');
+  assert.equal(px.marketCapUsd, 0);
 });
 
 test('M3-1b isFullRangePool：Pons hook 命中 或 tickSpacing≥200 才算全区间', () => {

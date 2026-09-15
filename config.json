@@ -139,7 +139,7 @@
       "wrappedNative": "0x0000000000000000000000000000000000000000",
       "poolManagerV4": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
       "explorer": "https://robinhoodchain.blockscout.com",
-      "gmgnBase": "",
+      "gmgnBase": "https://gmgn.ai/robinhood/token",
       "secPerBlockFallback": 0.1,
       "nativeUsdFallback": 2500,
       "nativeUsdPool": { "chain": "bsc", "pool": "0x531FEbfeb9a61D948c384ACFBe6dCc51057AEa7e", "usdt": "0x55d398326f99059fF775485246999027B3197955", "usdtDecimals": 18, "baseDecimals": 18 },

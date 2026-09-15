@@ -145,6 +145,10 @@ export async function pollCandidate(chain, cand) {
     curve: curve ? { ...curve, updatedAt: curveTs } : null, prev,
   });
   const depthUsd = px.depthUsd;
+  if (px.state === 'implausible') {
+    log.warn({ key: cand.key, chain, quoteSym: q?.sym, quoteUsd: quotePriceUsd, quoteDec, poolType: cand.pool_type },
+      '价格合理性钳位命中：疑似报价币单位错误，已归零(见 $MUMO 教训)');
+  }
   const depthKind = px.source === 'curve' ? 'curve' : (cand.pool ? 'amm' : 'curve');
   const offersPct = curve?.offersPct ?? prev?.offers_pct ?? 0;
   // 曲线毕业进度 = funds / maxRaising（同为报价币单位，比值与小数位无关），比「剩余%」直观。
@@ -277,6 +281,7 @@ export async function pollCandidate(chain, cand) {
     new_buyers_30m: flow.newBuyers30m,
     price_source: metrics.priceSource,
     price_updated_at: metrics.priceUpdatedAt,
+    price_state: metrics.priceState,
   });
   store.addSnapshot({
     key: cand.key,
