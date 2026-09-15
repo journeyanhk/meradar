@@ -19,6 +19,8 @@ export function linksFor(chain, cand) {
   const out = { explorer: `${cfg.explorer}/token/${cand.address}` };
   if (cfg.gmgnBase) out.gmgn = `${cfg.gmgnBase}/${cand.address}`;
   if (chain === 'bsc') out.fourmeme = `https://four.meme/token/${cand.address}`;
+  // Robinhood/Pons：官方发射台交易页(名称/图表/持有人/交易)，按代币地址直达。/launchpad/{address} 实测可用。
+  if (chain === 'robinhood') out.pons = `https://www.ponsfamily.com/launchpad/${cand.address}`;
   return out;
 }
 

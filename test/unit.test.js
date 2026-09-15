@@ -8,6 +8,7 @@ import { resolveQuote, quoteUsd } from '../src/enrich.js';
 import { normalizeSwap, pickToken } from '../src/discover.js';
 import { admissionFor } from '../src/config.js';
 import { chainConfig } from '../src/config.js';
+import { shouldRetryMeta, nextMetaState, metaBackoffMs, META_MAX_ATTEMPTS } from '../src/metaretry.js';
 import * as momentum from '../src/momentum.js';
 import { graduatedByCurve } from '../src/pool.js';
 import { goplusCheck } from '../src/goplus.js';
@@ -1093,4 +1094,47 @@ test('Arc 原生 USDC：0x0(v4 currency0) 解析为 USDC_NATIVE(18位, $1)，0x3
   assert.equal(erc.sym, 'USDC');
   assert.equal(erc.decimals, 6);
   assert.equal(quoteUsd('arc', 'USDC'), 1);
+});
+
+// —— 元数据补读退避（Pons 名字「?」/市值 $0 修复）——
+
+test('shouldRetryMeta：字段齐全不补；缺字段且未在退避窗内则补；达上限放弃', () => {
+  const now = 1_000_000;
+  // 齐全 → 不补
+  assert.equal(shouldRetryMeta({ symbol: 'PEPE', totalSupply: '1000' }, undefined, now), false);
+  // 缺 symbol、从未尝试 → 立即补
+  assert.equal(shouldRetryMeta({ symbol: null, totalSupply: '1000' }, undefined, now), true);
+  // 缺 total_supply、从未尝试 → 补
+  assert.equal(shouldRetryMeta({ symbol: 'PEPE', totalSupply: null }, undefined, now), true);
+  // 退避窗口内 → 不补
+  assert.equal(shouldRetryMeta({ symbol: null, totalSupply: null }, { attempts: 1, nextAt: now + 5000 }, now), false);
+  // 退避窗口已过 → 补
+  assert.equal(shouldRetryMeta({ symbol: null, totalSupply: null }, { attempts: 1, nextAt: now - 1 }, now), true);
+  // 达上限 → 放弃
+  assert.equal(shouldRetryMeta({ symbol: null, totalSupply: null }, { attempts: META_MAX_ATTEMPTS, nextAt: 0 }, now), false);
+});
+
+test('元数据补读：首轮失败进退避、窗口过后再试、成功后不再补(最终一致)', () => {
+  const now = 1_000_000;
+  const cand = { symbol: null, totalSupply: null };
+  // 首轮：应补 → 失败 → 推进退避
+  assert.equal(shouldRetryMeta(cand, undefined, now), true);
+  const s1 = nextMetaState(undefined, now);
+  assert.equal(s1.attempts, 1);
+  assert.equal(s1.nextAt, now + metaBackoffMs(1)); // 1m
+  // 退避窗口内不再试
+  assert.equal(shouldRetryMeta(cand, s1, now + 30_000), false);
+  // 窗口过后再试
+  assert.equal(shouldRetryMeta(cand, s1, s1.nextAt), true);
+  // 第二轮成功补齐 → 字段齐全 → 不再补
+  const filled = { symbol: 'HARVEST', totalSupply: '100000000000000000000000' };
+  assert.equal(shouldRetryMeta(filled, s1, s1.nextAt + 1), false);
+});
+
+test('metaBackoffMs：1m,1m,5m,5m,15m…索引超界取末位 15m', () => {
+  assert.equal(metaBackoffMs(1), 60_000);
+  assert.equal(metaBackoffMs(2), 60_000);
+  assert.equal(metaBackoffMs(3), 300_000);
+  assert.equal(metaBackoffMs(5), 900_000);
+  assert.equal(metaBackoffMs(99), 900_000); // 超界 → 末位
 });

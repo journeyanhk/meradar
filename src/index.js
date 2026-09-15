@@ -1,7 +1,7 @@
 import { config, chainConfig } from './config.js';
 import { startServer } from './server.js';
 import { startEngine, backfillRecentCreates } from './engine.js';
-import { httpClient, measureSecPerBlock } from './chain.js';
+import { logsClient, measureSecPerBlock } from './chain.js';
 import { refreshBnbUsd, getBnbUsd, refreshNativeUsd, getNativeUsd, hasLiveNativeUsd } from './enrich.js';
 import { refreshDynamicQuotes } from './quotePrice.js';
 import { probeStateOverride } from './rpccap.js';
@@ -14,7 +14,7 @@ import { logger } from './logger.js';
 // （带 address 的窄查询才是真实用法；空 topics 全量查询很多 RPC 会直接 403，不代表不可用。）
 async function selfCheckLogs(chain) {
   try {
-    const client = httpClient(chain);
+    const client = logsClient(chain); // 日志自检走官方端点(与回填同源)
     const cfg = chainConfig(chain);
     // 发射台地址：Four.meme 用 address，Pons 用 factory（工厂逐币部署）。任取一个有效地址做窄查询。
     const addrOf = (l) => l.address || l.factory;

@@ -3,7 +3,7 @@ import { readToken, quoteUsd, resolveQuote, readTokenInfo } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { store } from './db.js';
 import { config, chainConfig, admissionFor } from './config.js';
-import { httpClient, getSecPerBlock, estimateTsFromBlock } from './chain.js';
+import { httpClient, logsClient, getSecPerBlock, estimateTsFromBlock } from './chain.js';
 import { fourMemeEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents } from './abi.js';
 import { bus, Events } from './bus.js';
 import { startTracker } from './track.js';
@@ -480,7 +480,7 @@ async function backfillFourMeme(chain, hours = 2) {
     (l) => l.type === 'fourmeme-events' && l.address && !/^0x0+$/.test(l.address),
   );
   if (!lp) return 0;
-  const client = httpClient(chain);
+  const client = logsClient(chain); // getLogs 回填走官方端点
   let latest;
   try { latest = await client.getBlockNumber(); } catch (e) { log.warn({ chain, err: e.message }, '回填取块高失败'); return 0; }
   const blocksPerHour = Math.round(3600 / getSecPerBlock(chain)); // 实测出块间隔（BSC ~0.45s/块）
@@ -542,7 +542,7 @@ async function backfillPonsLaunches(chain, hours = 2) {
   const cfg = chainConfig(chain);
   const lp = cfg.launchpads?.find((l) => l.type === 'curve-per-token' && l.factory && !/^0x0+$/.test(l.factory));
   if (!lp) return 0;
-  const client = httpClient(chain);
+  const client = logsClient(chain); // getLogs 回填走官方端点(dRPC 的 getLogs 对逐币工厂失败)
   let latest;
   try { latest = await client.getBlockNumber(); } catch (e) { log.warn({ chain, err: e.message }, 'Pons 回填取块高失败'); return 0; }
   const secPerBlock = getSecPerBlock(chain); // 实测出块间隔（Robinhood ~0.1s/块），用于窗口跨度与 ts 估算

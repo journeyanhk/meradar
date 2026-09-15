@@ -18,9 +18,31 @@ function buildChain(chain) {
   };
 }
 
-// HTTP 客户端：用于只读调用 (enrich / track / honeypot)
+// HTTP 客户端：用于只读调用 (enrich / track / honeypot / 往返)。
+// readHttp 存在且异于官方 http 时(Robinhood dRPC)：优先 readHttp，失败退官方——只读调用(name/symbol/
+// multicall/extsload/往返 state override)在 dRPC 上稳定且不易 429；官方公共端点在回填后一批 promote
+// 集中读时会 429/超时(名字「?」、市值 $0 的根因)。BSC/Arc 无 readHttp → 单 transport，行为不变。
 export function httpClient(chain) {
   const key = `http:${chain}`;
+  if (clients.has(key)) return clients.get(key);
+  const rc = config.rpc[chain] || {};
+  const official = rc.http;
+  const read = rc.readHttp || official;
+  if (!read) throw new Error(`${chain} 缺少 HTTP RPC (检查 .env)`);
+  const opts = { batch: true, timeout: 15000, retryCount: 3 };
+  const transport = (rc.readHttp && rc.readHttp !== official)
+    ? fallback([http(rc.readHttp, opts), http(official, opts)])
+    : http(read, opts);
+  const client = createPublicClient({ chain: buildChain(chain), transport });
+  clients.set(key, client);
+  return client;
+}
+
+// getLogs / 回填 / 日志自检 专用客户端：始终走官方 http。
+// dRPC 的 eth_getLogs 对 Pons 逐币工厂地址会失败(实测)，故日志查询绝不走 readHttp。
+// BSC/Arc 官方 http 即唯一端点，与 httpClient 同源。
+export function logsClient(chain) {
+  const key = `logs:${chain}`;
   if (clients.has(key)) return clients.get(key);
   const url = config.rpc[chain]?.http;
   if (!url) throw new Error(`${chain} 缺少 HTTP RPC (检查 .env)`);

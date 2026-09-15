@@ -1,5 +1,6 @@
-import { readPoolMetrics, resolveQuote, quoteUsd, readCurveFunds } from './enrich.js';
+import { readPoolMetrics, resolveQuote, quoteUsd, readCurveFunds, readToken } from './enrich.js';
 import { resolvePrice } from './price.js';
+import { shouldRetryMeta, nextMetaState } from './metaretry.js';
 import { scoreCandidate, evaluateTradeSafety } from './score.js';
 import { discoverPool, graduatedByCurve } from './pool.js';
 import { narrativeHit, copycatCount } from './narrative.js';
@@ -69,8 +70,35 @@ function supplyHuman(cand) {
   catch { return 0; }
 }
 
+// 元数据补读退避状态：key -> { attempts, nextAt }。成功即删除，达上限保留(shouldRetryMeta 挡住不再试)。
+const metaRetry = new Map();
+
+// 缺 name/symbol/total_supply 时按退避补读一次链上元数据(最终一致，修「?」名字与 $0 市值)。
+// 成功 → enrich + 清退避状态，返回补齐后的行；失败 → 推进退避，返回原行。
+async function backfillMetaIfNeeded(chain, cand) {
+  if (!shouldRetryMeta({ symbol: cand.symbol, totalSupply: cand.total_supply }, metaRetry.get(cand.key))) {
+    if (cand.symbol && cand.total_supply) metaRetry.delete(cand.key); // 已齐全(可能被别处补上)→ 清状态
+    return cand;
+  }
+  const meta = await readToken(chain, cand.address).catch(() => null);
+  if (meta && meta.symbol) {
+    store.enrich(cand.key, {
+      name: meta.name, symbol: meta.symbol, decimals: meta.decimals,
+      total_supply: meta.totalSupply?.toString() || cand.total_supply, creator: cand.creator,
+    });
+    metaRetry.delete(cand.key);
+    log.info({ chain, key: cand.key, symbol: meta.symbol }, '元数据补读成功(修「?」名字/供应量)');
+    return store.get(cand.key) || cand;
+  }
+  metaRetry.set(cand.key, nextMetaState(metaRetry.get(cand.key)));
+  return cand;
+}
+
 // 对单个候选跑一次跟踪
 export async function pollCandidate(chain, cand) {
+  // 元数据补读(退避)：Pons 币 promote 时若 readToken 撞 429，name/symbol/supply 会留空 → 名字「?」、市值 $0。
+  // 每轮检查、按退避重试，成功即用补齐后的行走本轮定价(市值当轮即恢复)。
+  cand = await backfillMetaIfNeeded(chain, cand);
   const token = cand.address;
   const cfg = chainConfig(chain);
   // 报价币：BNB(0x0→WBNB)/USDT/USD1/… 各不相同。解析不到(未知报价币)则不定价，避免按 BNB 猜。
@@ -211,6 +239,9 @@ export async function pollCandidate(chain, cand) {
   // 软标记/自然买家未变则不写库(每候选每轮都会进这里，避免无谓 UPDATE + updated_at 抖动)。
   // v4 集中池「当前价位无流动性」并入软标记(与撤池区分：价格保旧、非 rug)。
   if (poolM?.noActiveLiquidity) softFlags = { ...(softFlags || {}), noActiveLiquidity: true };
+  // 供应量未读(元数据补读未完成)时价格有效但市值算不出=0 → 标 noSupply，卡片显示「供应量读取中」而非误导的 $0。
+  // backfillMetaIfNeeded 会在几轮内补上 total_supply，届时市值自动恢复、此标消失。
+  if (!cand.total_supply && px.priceUsd > 0) softFlags = { ...(softFlags || {}), noSupply: true };
   const softFlagsJson = softFlags ? JSON.stringify(softFlags) : null;
   if ((prev?.natural_buyers_30m ?? 0) !== (naturalBuyers30m | 0) || (prev?.soft_flags ?? null) !== softFlagsJson) {
     store.setBuyerFlags(cand.key, naturalBuyers30m, softFlags);

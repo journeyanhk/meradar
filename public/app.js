@@ -112,6 +112,7 @@ function cardHtml(d) {
   else if (d.priceUnknown) badges.push('<span class="badge unknown">价格未知</span>');
   else if (d.priceStale) badges.push(`<span class="badge stale">更新于${ago(d.priceUpdatedAt)}前</span>`);
   if (d.softFlags && d.softFlags.noActiveLiquidity) badges.push('<span class="badge noliq">当前价位无流动性</span>');
+  if (d.softFlags && d.softFlags.noSupply) badges.push('<span class="badge unpriced">供应量读取中</span>');
   const links = Object.entries(d.links || {}).map(([k, v]) => `<a href="${v}" target="_blank" rel="noopener">${k}</a>`).join('');
   const net = +d.netIn30m || 0;
   const netCls = net > 0 ? 'pos' : net < 0 ? 'neg' : '';
@@ -123,7 +124,7 @@ function cardHtml(d) {
     </div>
     ${tags.length ? `<div class="tags">${tags.join('')}</div>` : ''}
     <div class="metrics">
-      <span>市值 <b>${usd(d.marketCapUsd)}</b></span>
+      <span>市值 <b>${d.softFlags && d.softFlags.noSupply ? '读取中' : usd(d.marketCapUsd)}</b></span>
       <span>净流入30m <b class="${netCls}">${signed(net)}</b></span>
       <span>${depthLabel(d)}</span>
       <span>距峰值 <b>${dd > 0 ? '-' + dd.toFixed(0) + '%' : '—'}</b></span>
