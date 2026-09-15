@@ -1143,10 +1143,10 @@ test('metaBackoffMs：1m,1m,5m,5m,15m…索引超界取末位 15m', () => {
 
 // —— 可试仓 v1（evaluateEntry 纯函数）——
 const EF = {
-  enabled: true, auditVersion: 'v1',
-  hard: { minDepthUsd: 8000, maxMcapUsd: 300000, requirePriceOk: true },
-  structure: { minNaturalRatio: 0.45, maxSniperRatio: 0.40, maxFarmRatio: 0.30, maxDustRatio: 0.60, minNaturalBuyers30m: 5, minBuyerCount: 12 },
-  momentum: { minNetIn30m: 500, tierANetIn30m: 2000, maxDrawdownPct: 65 },
+  enabled: true, auditVersion: 'v1.1',
+  hard: { minDepthCurveUsd: 3000, minDepthAmmUsd: 8000, maxMcapUsd: 300000, requirePriceOk: true, minCurveProgressPct: 30, maxCurveProgressPct: 95, curveObserveBand: [75, 90] },
+  structure: { minNaturalRatio: 0.45, maxSniperRatio: 0.40, maxFarmRatio: 0.30, maxDustRatio: 0.60, maxFreshRatio: 0.30, minNaturalBuyers30m: 5, minBuyerCount: 12 },
+  momentum: { minNetIn30m: 500, tierANetIn30m: 2000, maxDrawdownPct: 65, graduatedWithinMin: 60, requireAccelForA: true },
   sizing: { depthPct: 0.02, tierAMaxUsd: 200, tierBMaxUsd: 100, unverifiedHalve: true, roundTo: 10 },
   rejectSoftFlags: ['数据冲突'],
 };
@@ -1168,7 +1168,7 @@ test('可试仓：安全 PASS + 强动能 → A，仓位跟深度(min(上限, �
   assert.equal(e.ok, true);
   assert.equal(e.tier, 'A');
   assert.equal(e.sizeUsd, 200); // min(200, 20000*0.02=400)=200
-  assert.equal(e.auditVersion, 'v1');
+  assert.equal(e.auditVersion, 'v1.1');
 });
 
 test('可试仓：深度小 → 仓位由深度封顶(160 而非上限 200)', () => {
@@ -1240,4 +1240,42 @@ test('可试仓：价格状态非 ok → 硬拒', () => {
 test('可试仓：配置未启用 → 返回 null(不产出)', () => {
   const m = { depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
   assert.equal(evaluateEntry(m, { enabled: false }, goodCounts), null);
+});
+
+// —— v1.1 新增：进度带 / 毕业时效 / 加速 / 新钱包 ——
+test('可试仓v1.1：曲线进度过早(20%<30%) → 硬拒', () => {
+  const m = { depthKind: 'curve', depthUsd: 5000, curveProgressPct: 20, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, false);
+  assert.ok(e.redFlags.some((r) => r.includes('进度过早')));
+});
+
+test('可试仓v1.1：曲线已被抢跑(96%>95%) → 硬拒', () => {
+  const m = { depthKind: 'curve', depthUsd: 5000, curveProgressPct: 96, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, false);
+  assert.ok(e.redFlags.some((r) => r.includes('已被抢跑')));
+});
+
+test('可试仓v1.1：老毕业币(毕业3h且无强动量) → 硬拒', () => {
+  const now = Date.now();
+  const m = { depthKind: 'amm', depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 800, naturalBuyers30m: 8, graduated: true, graduatedAt: now - 3 * 3600 * 1000, now, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, false);
+  assert.ok(e.redFlags.some((r) => r.includes('老毕业币')));
+});
+
+test('可试仓v1.1：30m强但1h在衰减(2·net30<net1h) → 只给 B', () => {
+  const m = { depthKind: 'amm', depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, netIn1h: 8000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, true);
+  assert.equal(e.tier, 'B'); // 净流入达 A 线但早半段更大=衰减 → 降 B
+});
+
+test('可试仓v1.1：新钱包占比过高(40%>30%) → 硬拒', () => {
+  const freshy = { buyerCount: 20, naturalBuyers: 12, sniper: 4, farm: 2, dust: 5, fresh: 8 }; // fresh 0.4
+  const m = { depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, freshy);
+  assert.equal(e.ok, false);
+  assert.ok(e.redFlags.some((r) => r.includes('新钱包')));
 });

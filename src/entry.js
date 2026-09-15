@@ -1,10 +1,11 @@
-// 可试仓 v1（小资金试仓过滤）—— 纯函数，跨链通用，无 RPC / 无 DB / 不改分级阈值。
+// 可试仓 v1.1（小资金试仓过滤）—— 纯函数，跨链通用，无 RPC / 无 DB / 不改分级阈值。
 //
-// 设计（见评审「可试仓 v1」拍板）：
-//  · 只读本轮 metrics + 候选行 + 买家计数(softFlags) + 链级 entryFilter 配置，产出 {ok, tier, sizeUsd, ...}。
+// 设计（见评审「可试仓 v1 / v1.1」拍板）：
+//  · 只读本轮 metrics + 买家计数(softFlags) + 链级 entryFilter 配置，产出 {ok, tier, sizeUsd, ...}。
 //  · 四段门：hard(硬门槛) → structure(买家结构) → momentum(动能) → safety(贸易安全)。任一硬失败即 ok=false。
 //  · 仓位跟深度走：sizeUsd = min(tier 上限, depth×depthPct)，unverified 毕业币再减半——绝不给固定额度打穿小池。
-//  · 分层只决定上限：A(安全 PASS + 强动能) 上限高；B(其余合格，含 unverified 减半) 上限低。
+//  · 分层只决定上限：A(安全 PASS + 强动能 + 未衰减) 上限高；B(其余合格，含 unverified 减半) 上限低。
+//  · v1.1 补三条「太早/太晚/在衰减」判据：曲线进度带、深度按池型、毕业 60min 时效、A 档加速门、maxFreshRatio。
 //  · v1 不含「疑似对倒」信号(拍板选 A：后续单独做)。auditVersion 落进结果，health 按版本统计命中数。
 //  · 比率从落库计数现算(buyerRatios)，与 server.js API 层同一实现，避免漂移。
 import { buyerRatios } from './buyer.js';
@@ -15,7 +16,7 @@ function floorTo(v, step) {
 }
 
 /**
- * @param m      本轮 metrics(depthUsd/marketCapUsd/peakMcapUsd/priceState/netIn30m/graduated/tradeSafety/...)
+ * @param m      本轮 metrics(depthUsd/depthKind/curveProgressPct/marketCapUsd/peakMcapUsd/priceState/netIn30m/netIn1h/graduated/graduatedAt/now/tradeSafety/...)
  * @param ef     链级 entryFilter 配置(entryFilterFor(chain))
  * @param counts 本轮买家分级计数(track.js 的 softFlags：{buyerCount, naturalBuyers, sniper, ...})；缺失=数据不足
  * @returns { ok, tier:'A'|'B'|null, sizeUsd, reasons[], redFlags[], auditVersion } | null(未启用)
@@ -34,12 +35,25 @@ export function evaluateEntry(m, ef, counts) {
   // —— 段1 硬门槛 ——
   const depthUsd = m.depthUsd || 0;
   const mcap = m.marketCapUsd || 0;
+  const isCurve = m.depthKind === 'curve'; // Arc pool-first 无曲线 → 走 AMM 分支，跳过进度带
   if (hard.requirePriceOk && m.priceState && m.priceState !== 'ok') {
     redFlags.push(`价格状态:${m.priceState}`);
   }
-  if (depthUsd < (hard.minDepthUsd || 0)) redFlags.push(`深度不足 ${Math.round(depthUsd)}<${hard.minDepthUsd}`);
+  // 深度按池型拆分：曲线期池浅门槛低(minDepthCurveUsd)、毕业后 AMM 门槛高(minDepthAmmUsd)；
+  // 两键缺失时回退旧单一 minDepthUsd —— 同一 $8K 在曲线/AMM 下含义不同，拆开才可比。
+  const minDepth = isCurve
+    ? (hard.minDepthCurveUsd ?? hard.minDepthUsd ?? 0)
+    : (hard.minDepthAmmUsd ?? hard.minDepthUsd ?? 0);
+  if (depthUsd < minDepth) redFlags.push(`深度不足 ${Math.round(depthUsd)}<${minDepth}`);
   else reasons.push(`深度 $${Math.round(depthUsd)}`);
   if (hard.maxMcapUsd && mcap > hard.maxMcapUsd) redFlags.push(`市值超上限 ${Math.round(mcap)}>${hard.maxMcapUsd}`);
+  // 曲线进度带：仅曲线期适用。<min 太早(易归零)、>max 已被抢跑(接盘)；带内加一条 reason 供解释。
+  if (isCurve) {
+    const prog = m.curveProgressPct || 0;
+    if (hard.minCurveProgressPct != null && prog < hard.minCurveProgressPct) redFlags.push(`进度过早 ${prog.toFixed(0)}%<${hard.minCurveProgressPct}%`);
+    else if (hard.maxCurveProgressPct != null && prog > hard.maxCurveProgressPct) redFlags.push(`已被抢跑 ${prog.toFixed(0)}%>${hard.maxCurveProgressPct}%`);
+    else if (Array.isArray(hard.curveObserveBand) && prog >= hard.curveObserveBand[0] && prog <= hard.curveObserveBand[1]) reasons.push(`进度带 ${prog.toFixed(0)}%`);
+  }
 
   // —— 段2 买家结构（比率从计数现算；无计数=数据不足，保守拒） ——
   if (!counts || !counts.buyerCount) {
@@ -52,16 +66,24 @@ export function evaluateEntry(m, ef, counts) {
     if (structure.maxSniperRatio != null && r.sniperRatio > structure.maxSniperRatio) redFlags.push(`狙击占比高 ${(r.sniperRatio * 100).toFixed(0)}%`);
     if (structure.maxFarmRatio != null && r.farmRatio > structure.maxFarmRatio) redFlags.push(`工作室占比高 ${(r.farmRatio * 100).toFixed(0)}%`);
     if (structure.maxDustRatio != null && r.dustRatio > structure.maxDustRatio) redFlags.push(`粉尘占比高 ${(r.dustRatio * 100).toFixed(0)}%`);
+    if (structure.maxFreshRatio != null && r.freshRatio > structure.maxFreshRatio) redFlags.push(`新钱包占比高 ${(r.freshRatio * 100).toFixed(0)}%`);
     if (structure.minNaturalBuyers30m != null && (m.naturalBuyers30m || 0) < structure.minNaturalBuyers30m) redFlags.push(`30m自然买家少 ${m.naturalBuyers30m || 0}<${structure.minNaturalBuyers30m}`);
   }
 
-  // —— 段3 动能（净流入 + 回撤） ——
+  // —— 段3 动能（净流入 + 回撤 + 毕业时效） ——
   const netIn30m = m.netIn30m || 0;
+  const netIn1h = m.netIn1h || 0;
+  const strongFlow = netIn30m >= (momentum.tierANetIn30m || Infinity); // 复用：强动量线(A 档 & 毕业时效豁免)
   if (netIn30m < (momentum.minNetIn30m || 0)) redFlags.push(`30m净流入低 ${Math.round(netIn30m)}<${momentum.minNetIn30m}`);
   else reasons.push(`30m净流入 $${Math.round(netIn30m)}`);
   const peak = m.peakMcapUsd || 0;
   const drawdownPct = peak > 0 ? Math.max(0, ((peak - mcap) / peak) * 100) : 0;
   if (momentum.maxDrawdownPct != null && drawdownPct > momentum.maxDrawdownPct) redFlags.push(`回撤过深 ${drawdownPct.toFixed(0)}%>${momentum.maxDrawdownPct}%`);
+  // 毕业时效：只做「毕业腿」——毕业超 graduatedWithinMin 分钟且无强动量的老毕业币直接拒(动能已散)。
+  if (momentum.graduatedWithinMin != null && m.graduated && m.graduatedAt) {
+    const ageMin = ((m.now || Date.now()) - m.graduatedAt) / 60000;
+    if (ageMin > momentum.graduatedWithinMin && !strongFlow) redFlags.push(`老毕业币 ${Math.round(ageMin)}m>${momentum.graduatedWithinMin}m`);
+  }
 
   // —— 段4 贸易安全 ——
   // PASS → 放行(全额)；WAIT+unverified(v4 往返未实现，链级豁免期) → 放行但减半、封顶 B；
@@ -81,8 +103,12 @@ export function evaluateEntry(m, ef, counts) {
   if (!ok) return { ok: false, tier: null, sizeUsd: 0, reasons, redFlags, auditVersion };
 
   // —— 分层 + 仓位 ——
-  // A：安全 PASS 且 30m 净流入达强动能线；否则 B(含 unverified 减半路径始终封顶 B)。
-  const strong = !unverified && netIn30m >= (momentum.tierANetIn30m || Infinity);
+  // A：安全 PASS + 30m 净流入达强动能线 + 未衰减；否则 B(含 unverified 减半路径始终封顶 B)。
+  // 加速门(requireAccelForA)：net1h 窗口 ⊇ net30 窗口，早半段=net1h−net30。
+  //   近半段 ≥ 早半段 ⟺ 2·net30 ≥ net1h ⟺ 动量未衰减 → 才给 A；否则(正在衰减)降 B。
+  //   ⚠ 与评审字面式 net1h≥2·net30 相反——那一式命中的是「早半段更大=衰减」，与其排除衰减的本意冲突，故取反。
+  const accelOk = !momentum.requireAccelForA || (2 * netIn30m >= netIn1h);
+  const strong = !unverified && strongFlow && accelOk;
   const tier = strong ? 'A' : 'B';
   const cap = tier === 'A' ? (sizing.tierAMaxUsd || 0) : (sizing.tierBMaxUsd || 0);
   let sizeUsd = Math.min(cap, depthUsd * (sizing.depthPct || 0.02));

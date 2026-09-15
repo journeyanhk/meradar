@@ -49,10 +49,10 @@
   },
   "entryFilter": {
     "enabled": true,
-    "auditVersion": "v1",
-    "hard": { "minDepthUsd": 8000, "maxMcapUsd": 300000, "requirePriceOk": true },
-    "structure": { "minNaturalRatio": 0.45, "maxSniperRatio": 0.4, "maxFarmRatio": 0.3, "maxDustRatio": 0.6, "minNaturalBuyers30m": 5, "minBuyerCount": 12 },
-    "momentum": { "minNetIn30m": 500, "tierANetIn30m": 2000, "maxDrawdownPct": 65 },
+    "auditVersion": "v1.1",
+    "hard": { "minDepthCurveUsd": 3000, "minDepthAmmUsd": 8000, "maxMcapUsd": 300000, "requirePriceOk": true, "minCurveProgressPct": 30, "maxCurveProgressPct": 95, "curveObserveBand": [75, 90] },
+    "structure": { "minNaturalRatio": 0.45, "maxSniperRatio": 0.4, "maxFarmRatio": 0.3, "maxDustRatio": 0.6, "maxFreshRatio": 0.3, "minNaturalBuyers30m": 5, "minBuyerCount": 12 },
+    "momentum": { "minNetIn30m": 500, "tierANetIn30m": 2000, "maxDrawdownPct": 65, "graduatedWithinMin": 60, "requireAccelForA": true },
     "sizing": { "depthPct": 0.02, "tierAMaxUsd": 200, "tierBMaxUsd": 100, "unverifiedHalve": true, "roundTo": 10 },
     "rejectSoftFlags": ["数据冲突"]
   },
@@ -134,7 +134,7 @@
         "T2": { "marketCapUsd": 100000, "minLiquidityUsd": 10000, "momentumMinNetInUsd": 500 }
       },
       "entryFilter": {
-        "hard": { "minDepthUsd": 5000, "maxMcapUsd": 150000 },
+        "hard": { "minDepthAmmUsd": 5000, "maxMcapUsd": 150000 },
         "structure": { "maxSniperRatio": 0.3, "minNaturalBuyers30m": 4 },
         "momentum": { "minNetIn30m": 300, "tierANetIn30m": 1000 },
         "sizing": { "tierAMaxUsd": 100, "tierBMaxUsd": 50 }
@@ -192,7 +192,7 @@
         "T2": { "marketCapUsd": 150000, "minLiquidityUsd": 20000, "momentumMinNetInUsd": 500 }
       },
       "entryFilter": {
-        "hard": { "minDepthUsd": 6000 },
+        "hard": { "minDepthCurveUsd": 2500, "minDepthAmmUsd": 6000 },
         "momentum": { "minNetIn30m": 400 }
       },
       "narrativeKeywords": ["TSLA", "NVDA", "SPY", "HIMS", "MU", "AI", "Inu", "Pons", "Robinhood", "stock", "ETF"],
