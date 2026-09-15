@@ -5,6 +5,45 @@ import { child } from './logger.js';
 const log = child('chain');
 const clients = new Map();
 
+// WS 端点列表：ROBINHOOD_WS 等支持逗号分隔（主路,第二路…），解析成数组供 wsClient 组 fallback。
+function wsUrls(chain) {
+  return (config.rpc[chain]?.ws || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// 由 URL 主机名归一成短标签（并隐藏 Alchemy 等 URL 里的 API key），供 /api/health 展示走的是哪一路。
+function endpointLabel(url) {
+  if (!url) return null;
+  try {
+    const h = new URL(url).host;
+    if (h.includes('drpc')) return 'drpc';
+    if (h.includes('alchemy')) return 'alchemy';
+    if (h.includes('publicnode')) return 'publicnode';
+    if (h.includes('quiknode') || h.includes('quicknode')) return 'quicknode';
+    if (h.includes('getblock')) return 'getblock';
+    if (h.includes('robinhood.com')) return 'official';
+    return h;
+  } catch {
+    return 'invalid';
+  }
+}
+
+// 供 /api/health 暴露各链 RPC 路由：ws 为优先级列表(首项=主路)，read/logs 各走哪一路。
+export function rpcRouting() {
+  const out = {};
+  for (const chain of config.enabledChains) {
+    const rc = config.rpc[chain] || {};
+    out[chain] = {
+      ws: wsUrls(chain).map(endpointLabel),
+      read: endpointLabel(rc.readHttp || rc.http),
+      logs: endpointLabel(rc.logsHttp || rc.http),
+    };
+  }
+  return out;
+}
+
 function buildChain(chain) {
   const c = chainConfig(chain);
   return {
@@ -38,13 +77,14 @@ export function httpClient(chain) {
   return client;
 }
 
-// getLogs / 回填 / 日志自检 专用客户端：始终走官方 http。
-// dRPC 的 eth_getLogs 对 Pons 逐币工厂地址会失败(实测)，故日志查询绝不走 readHttp。
-// BSC/Arc 官方 http 即唯一端点，与 httpClient 同源。
+// getLogs / 回填 / 日志自检 专用客户端：优先 logsHttp(可指向 Alchemy 第二路，官方端点密集查询 429)，
+// 无则回落官方 http。dRPC 的 eth_getLogs 对 Pons 逐币工厂地址会失败(实测)，故绝不走 readHttp。
+// BSC/Arc 未配 logsHttp 时官方 http 即唯一端点，与 httpClient 同源，行为不变。
 export function logsClient(chain) {
   const key = `logs:${chain}`;
   if (clients.has(key)) return clients.get(key);
-  const url = config.rpc[chain]?.http;
+  const rc = config.rpc[chain] || {};
+  const url = rc.logsHttp || rc.http;
   if (!url) throw new Error(`${chain} 缺少 HTTP RPC (检查 .env)`);
   const client = createPublicClient({
     chain: buildChain(chain),
@@ -95,13 +135,16 @@ export function estimateTsFromBlock(chain, block) {
 }
 
 // WebSocket 客户端：用于订阅日志 (discover)。自动重连。
+// ws 支持逗号分隔的多路(主路,第二路…)：组成 viem fallback，主路断线/限流自动切第二路，事件不漏。
 export function wsClient(chain) {
   const key = `ws:${chain}`;
   if (clients.has(key)) return clients.get(key);
-  const ws = config.rpc[chain]?.ws;
+  const wsList = wsUrls(chain);
   const httpUrl = config.rpc[chain]?.http;
   const transports = [];
-  if (ws) transports.push(webSocket(ws, { reconnect: { attempts: 999, delay: 2000 }, keepAlive: true }));
+  for (const url of wsList) {
+    transports.push(webSocket(url, { reconnect: { attempts: 999, delay: 2000 }, keepAlive: true }));
+  }
   if (httpUrl) transports.push(http(httpUrl, { batch: true })); // 兜底轮询
   if (!transports.length) throw new Error(`${chain} 缺少 WS/HTTP RPC`);
   const client = createPublicClient({
@@ -110,6 +153,7 @@ export function wsClient(chain) {
     pollingInterval: 4000,
   });
   clients.set(key, client);
-  if (!ws) log.warn({ chain }, 'WS 未配置，回退到 HTTP 轮询（延迟更高，强烈建议配置 BSC_WS）');
+  if (!wsList.length) log.warn({ chain }, 'WS 未配置，回退到 HTTP 轮询（延迟更高，强烈建议配置 BSC_WS）');
+  else if (wsList.length > 1) log.info({ chain, routes: wsList.map(endpointLabel) }, 'WS 多路 fallback 已启用');
   return client;
 }

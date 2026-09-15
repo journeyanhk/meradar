@@ -8,6 +8,7 @@ import { linksFor } from './alert.js';
 import { healthSnapshot } from './health.js';
 import { templateHealth } from './template.js';
 import { rpcCapabilities } from './rpccap.js';
+import { rpcRouting } from './chain.js';
 import { child } from './logger.js';
 import { BUYER_TAGS } from './buyer.js';
 import { PRICE_STALE_MS, PRICE_UNKNOWN_MS } from './price.js';
@@ -99,6 +100,7 @@ export async function startServer() {
     telegram: config.telegram.enabled, serverchan: config.serverchan.enabled,
     runtime: healthSnapshot(),
     rpcCapabilities: rpcCapabilities(),
+    rpcRouting: rpcRouting(), // 各链 RPC 路由：ws 优先级列表(首项=主路)、read/logs 各走哪一路(drpc/alchemy/official…)
     template: templateHealth(), // { promoted24h, templateUnknownRate, learned } —— 未知率>5% 提示模板轮换
     buyerGrading: farmDistribution(), // 每链 tokens_bought_24h 分位(50/90/99/max) + farm 命中数，供一周后定阈值
     poolCreators24h: poolCreatorsSection(), // pool-first 链(Arc)首日反推发射台：建池者/被调合约 Top10

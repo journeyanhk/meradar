@@ -25,14 +25,18 @@ export const config = {
     .map((s) => s.trim())
     .filter(Boolean),
   rpc: {
-    bsc: { http: env('BSC_HTTP'), ws: env('BSC_WS') },
-    arc: { http: env('ARC_HTTP'), ws: env('ARC_WS') },
-    // Robinhood Chain：官方 HTTP 做 getLogs 回填(≤1400 块/段，dRPC 的 getLogs 对逐币工厂会失败)，
-    // dRPC HTTP 做只读调用(name/symbol/multicall/往返 state override，比官方公共端点稳、不易 429)，dRPC WS 做实时订阅。
-    // 均有默认公共端点，未配 .env 也能跑（付费端点更稳，可在 .env 覆盖）。
+    // ws 支持逗号分隔的多路（主路,第二路…）：wsClient 解析成 viem fallback，断线自动切换。
+    // logsHttp 为 getLogs/回填/自检 专用端点（留空回落 http）：官方公共端点密集查询会 429，
+    // 可指向 Alchemy 等第二路只承接回填，用量小、免费额度足。
+    bsc: { http: env('BSC_HTTP'), ws: env('BSC_WS'), logsHttp: env('BSC_LOGS_HTTP') },
+    arc: { http: env('ARC_HTTP'), ws: env('ARC_WS'), logsHttp: env('ARC_LOGS_HTTP') },
+    // Robinhood Chain：官方 HTTP 做兜底；logsHttp(Alchemy)做 getLogs 回填(官方对密集查询 429)，
+    // dRPC HTTP 做只读调用(name/symbol/multicall/往返 state override，比官方公共端点稳、不易 429)，
+    // ws 主路 dRPC + 第二路 Alchemy(逗号分隔)。均有默认公共端点，未配 .env 也能跑（付费端点更稳，可在 .env 覆盖）。
     robinhood: {
       http: env('ROBINHOOD_HTTP', 'https://rpc.mainnet.chain.robinhood.com'),
       readHttp: env('ROBINHOOD_READ_HTTP', 'https://robinhood.drpc.org'),
+      logsHttp: env('ROBINHOOD_LOGS_HTTP'),
       ws: env('ROBINHOOD_WS', 'wss://robinhood.drpc.org'),
     },
   },
