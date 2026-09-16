@@ -1,4 +1,4 @@
-import { watchChain, resubscribeSwaps, resubscribeV4Swaps, subscribeV4SwapsFull, registerPonsCurve, seedPonsCurves, ponsTokenOf } from './discover.js';
+import { watchChain, resubscribeSwaps, resubscribeV4Swaps, subscribeV4SwapsFull, resolveV4TxFrom, registerPonsCurve, seedPonsCurves, ponsTokenOf } from './discover.js';
 import { readToken, quoteUsd, resolveQuote, readTokenInfo } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { store } from './db.js';
@@ -201,6 +201,38 @@ async function onTrade(t) {
 }
 
 // 毕业后成交（AMM Swap）：喂动量买家 + 落库，与曲线期同源同表。
+// —— v4 两段式准入状态(Arc pool-first)：seen 池先按不同买单 txHash 数零成本预筛，
+// 够 admission 才解析 tx.from。绝大多数从未热过的池永不触发 getTransaction。 ——
+const v4SeenBuyTx = new Map();    // key -> Set<txHashLower>（预筛：不同买单交易数）
+const v4SeenAdmitted = new Set(); // key -> 已过预筛，转逐笔解析
+const V4_SEEN_TX_MAX = 20000;     // 预筛集合上限：超出按插入序淘汰最旧(冷池不会久留)
+function forgetV4Admission(key) { v4SeenBuyTx.delete(key); v4SeenAdmitted.delete(key); }
+
+// seen v4 买单准入：预筛未过→零 RPC 仅更新活跃；刚过→一次性补齐集合内全部买家；已过→逐笔解析。
+async function admitV4SeenBuy(sw, key, cand, isBuy) {
+  if (!isBuy) { momentum.onTrade({ token: sw.address, account: null, isBuy: false, ts: sw.ts }); return; } // 卖单只刷活跃时间
+  if (!sw.txHash) return;
+  const admission = admissionFor(sw.chain);
+  if (v4SeenAdmitted.has(key)) { // 已过预筛：逐笔解析 from → 计买家 → 试升级
+    const from = await resolveV4TxFrom(sw.chain, sw.txHash);
+    momentum.onTrade({ token: sw.address, account: from, isBuy: true, ts: sw.ts });
+    await promoteFromPool(sw.chain, key, cand);
+    return;
+  }
+  let set = v4SeenBuyTx.get(key);
+  if (!set) { set = new Set(); v4SeenBuyTx.set(key, set); if (v4SeenBuyTx.size > V4_SEEN_TX_MAX) v4SeenBuyTx.delete(v4SeenBuyTx.keys().next().value); }
+  set.add(sw.txHash.toLowerCase());
+  if (set.size < admission) { momentum.onTrade({ token: sw.address, account: null, isBuy: true, ts: sw.ts }); return; } // 预筛未过：零 RPC，account=null 不计买家/不推 buyTs，仅刷活跃
+  // 预筛刚过：一次性解析集合内全部买单 from，补齐买家(避免阈值前的买家漏计导致升级滞后)，之后转逐笔。
+  v4SeenAdmitted.add(key);
+  for (const th of set) {
+    const from = await resolveV4TxFrom(sw.chain, th);
+    momentum.onTrade({ token: sw.address, account: from, isBuy: true, ts: sw.ts });
+  }
+  v4SeenBuyTx.delete(key); // 集合已消费，释放内存
+  await promoteFromPool(sw.chain, key, cand);
+}
+
 async function onSwap(sw) {
   const key = `${sw.chain}:${sw.address.toLowerCase()}`;
   const cand = store.get(key);
@@ -211,15 +243,21 @@ async function onSwap(sw) {
     recordPoolState(sw.chain, sw.pool, { sqrtPriceX96: sw.sqrtPriceX96, liquidity: sw.liquidity, tick: sw.tick, ts: sw.ts, fee: sw.fee });
   }
   const isBuy = sw.side === 'buy';
-  momentum.onTrade({ token: sw.address, account: isBuy ? sw.account : null, isBuy, ts: sw.ts });
+  const discover = chainConfig(sw.chain).discoverFromPools;
 
-  // Arc pool-first：seen 池成交只喂动量计买家，达 admission 才升 active；升级前不写 trades
-  // (避免未过安全打分的币污染 trades 表)。仅 discoverFromPools 链走此分支。
-  if (cand.status === 'seen') {
-    if (chainConfig(sw.chain).discoverFromPools) {
-      store.touchLastTrade(key, sw.ts); // 刷新最后成交时刻 → 有量的 seen 池不被新建空池挤出 500 上限
-      await promoteFromPool(sw.chain, key, cand);
-    }
+  // Arc pool-first v4 seen 池：两段式准入，尽量零 RPC；升级前不写 trades(避免未过安全打分的币污染)。
+  if (sw.poolType === 'v4' && cand.status === 'seen' && discover) {
+    store.touchLastTrade(key, sw.ts); // 刷新最后成交时刻 → 有量的 seen 池不被清理窗口挤出
+    await admitV4SeenBuy(sw, key, cand, isBuy);
+    return;
+  }
+
+  // 其余(V2/V3 全部 + v4 active)：account = 事件自带(V2/V3) 或 v4 逐笔解析(归因需真实 from)。
+  const account = sw.poolType === 'v4' ? await resolveV4TxFrom(sw.chain, sw.txHash) : sw.account;
+  momentum.onTrade({ token: sw.address, account: isBuy ? account : null, isBuy, ts: sw.ts });
+
+  if (cand.status === 'seen') { // 非 v4 的 pool-first seen(AMM)：account 随事件到达
+    if (discover) { store.touchLastTrade(key, sw.ts); await promoteFromPool(sw.chain, key, cand); }
     return;
   }
   if (cand.status !== 'active') return;
@@ -228,12 +266,12 @@ async function onSwap(sw) {
   const price = sw.tokenHuman > 0 ? usd / sw.tokenHuman : 0;
   const supply = supplyHumanOf(cand);
   store.addTrade({
-    key, ts: sw.ts, side: sw.side, account: sw.account,
+    key, ts: sw.ts, side: sw.side, account,
     quote_amount: usd, token_amount: sw.tokenHuman || 0,
     price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null, block: sw.block ?? null,
   });
-  if (isBuy && sw.account) store.addBuyer(key, sw.account, sw.ts);
-  if (chainConfig(sw.chain).discoverFromPools) store.touchLastTrade(key, sw.ts); // active 池同刷，有量的池排序靠前不被挤出
+  if (isBuy && account) store.addBuyer(key, account, sw.ts);
+  if (discover) store.touchLastTrade(key, sw.ts); // active 池同刷，有量的池排序靠前不被挤出
   recordTradeWrite();
 }
 
@@ -280,6 +318,7 @@ async function recordPoolCreator(chain, { tx, pool }) {
 async function promoteFromPool(chain, key, cand) {
   if (momentum.buyerCount(cand.address) < admissionFor(chain)) return;
   if (!store.promote(key)) return;
+  forgetV4Admission(key); // 已升 active，后续走 active 分支，释放两段式准入状态
   recordPromoted();
   for (const acc of momentum.buyers(cand.address)) store.addBuyer(key, acc, 0);
   const fresh = store.get(key);

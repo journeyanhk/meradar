@@ -1303,3 +1303,21 @@ test('健康快照暴露 getTransactionPerMin：v4 取 tx.from 的 RPC 压力可
   const after = healthSnapshot().getTransactionPerMin;
   assert.equal(after, before + 2);
 });
+
+// —— 两段式准入：normalizeSwapV4 变纯解码(零 RPC)，account 不在此解析、仅带回 txHash ——
+import { normalizeSwapV4 } from '../src/discover.js';
+
+test('normalizeSwapV4：纯解码不取 tx.from(account=null)、带回 txHash 供 engine 按需解析', () => {
+  const sw = _rh.v4.realSwapTx.events.find((e) => e.event === 'Swap').args;
+  const log = {
+    args: { id: sw.id, amount0: BigInt(sw.amount0), amount1: BigInt(sw.amount1), sqrtPriceX96: BigInt(sw.sqrtPriceX96), liquidity: BigInt(sw.liquidity), tick: sw.tick, fee: sw.fee },
+    transactionHash: '0xDEADBEEF', blockNumber: 123n,
+  };
+  const p = { token: '0xabc', poolId: sw.id, quoteSym: 'ETH', quoteDecimals: 18, tokenDecimals: 18, memeIsCurrency0: false };
+  const norm = normalizeSwapV4(log, p, 'robinhood');
+  assert.equal(norm.account, null, 'account 不在归一化阶段解析');
+  assert.equal(norm.txHash, '0xDEADBEEF', 'txHash 带回供两段式准入');
+  assert.equal(norm.side, 'buy'); // amount1(meme)>0 → 买
+  assert.equal(norm.poolType, 'v4');
+  assert.equal(norm.fee, Number(sw.fee));
+});

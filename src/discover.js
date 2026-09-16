@@ -364,9 +364,10 @@ export function resubscribeV4Swaps(chain, poolManager, pools, onSwap) {
 function dispatchV4Swap(l, meta, chain, onSwap) {
   const p = meta.get(String(l.args?.id || '').toLowerCase());
   if (!p) return;
-  normalizeSwapV4(l, p, chain)
-    .then((norm) => { if (norm) onSwap(norm); })
-    .catch((e) => log.debug({ err: e.message }, 'v4 swap 解码失败'));
+  try {
+    const norm = normalizeSwapV4(l, p, chain);
+    if (norm) onSwap(norm);
+  } catch (e) { log.debug({ err: e.message }, 'v4 swap 解码失败'); }
 }
 
 /**
@@ -408,43 +409,44 @@ export function classifyV4Swap({ amount0, amount1, memeIsCurrency0 }) {
 }
 
 /**
- * v4 Swap 归一化。买家/卖家=tx.from —— Swap.sender 是 Router、HookFeeCollected.payer 是 memecoin 合约，
- * 均非真实交易者(已链上核验)；故买单与卖单都额外拉一次 getTransaction 取 from，
- * 取不到/零地址则不记账户(double-zero 兜底)。卖单也取 from，是为让毕业后 flipper(快进快出)可归因。
- * 同一 txHash 常含多条 Swap(路由多跳/同池连买) → LRU 缓存 txHash→from，省重复 getTransaction。
+ * v4 Swap 归一化(纯解码，零 RPC)。买家/卖家=tx.from —— Swap.sender 是 Router、
+ * HookFeeCollected.payer 是 memecoin 合约，均非真实交易者(已链上核验)；故 account 不在此解析，
+ * 仅带回 txHash，由 engine 两段式准入按需经 resolveV4TxFrom 解析(热池才付 getTransaction 成本)。
  */
-const TX_FROM_CACHE = new Map(); // txHashLower -> from(lower)（LRU：超上限删最旧）
-const TX_FROM_CACHE_MAX = 20000;
-function cacheTxFrom(hash, from) {
-  TX_FROM_CACHE.set(hash, from);
-  if (TX_FROM_CACHE.size > TX_FROM_CACHE_MAX) TX_FROM_CACHE.delete(TX_FROM_CACHE.keys().next().value);
-}
-async function normalizeSwapV4(l, p, chain) {
+export function normalizeSwapV4(l, p, chain) {
   const a = l.args || {};
   const c = classifyV4Swap({ amount0: a.amount0, amount1: a.amount1, memeIsCurrency0: p.memeIsCurrency0 });
   if (!c || c.quoteRaw <= 0n) return null;
-  let account = null;
-  if (l.transactionHash) {
-    const hash = l.transactionHash.toLowerCase();
-    if (TX_FROM_CACHE.has(hash)) {
-      account = TX_FROM_CACHE.get(hash); // 命中缓存(可能是 null，代表已确认无有效 from)
-    } else {
-      try {
-        recordTxFetch();
-        const tx = await httpClient(chain).getTransaction({ hash: l.transactionHash });
-        const from = (tx?.from || '').toLowerCase();
-        account = (from && !/^0x0+$/.test(from)) ? from : null;
-        cacheTxFrom(hash, account);
-      } catch { /* 拿不到 from → 不计账户，且不缓存(留待下次重试) */ }
-    }
-  }
   const quoteHuman = Number(formatUnits(c.quoteRaw, p.quoteDecimals || 18));
   const tokenHuman = Number(formatUnits(c.tokenRaw, p.tokenDecimals || 18));
   // sqrtPriceX96/liquidity 随 Swap 事件到达 → 供 onSwap 写 poolState，实现事件驱动定价(零 RPC)。
   return {
-    chain, address: p.token, account, side: c.side, quoteHuman, quoteSym: p.quoteSym,
+    chain, address: p.token, account: null, txHash: l.transactionHash || null,
+    side: c.side, quoteHuman, quoteSym: p.quoteSym,
     tokenHuman, block: Number(l.blockNumber || 0), ts: Date.now(),
     pool: p.poolId, poolType: 'v4', sqrtPriceX96: a.sqrtPriceX96, liquidity: a.liquidity, tick: a.tick,
     fee: a.fee != null ? Number(a.fee) : null, // v4 动态费率(百万分之)：供费率硬拒(90.1% 反狙击池)
   };
+}
+
+/**
+ * tx.from 解析(LRU 缓存)。同一 txHash 常含多条 Swap(路由多跳/同池连买)、多池共用一笔交易 →
+ * 缓存 txHash→from 省重复 getTransaction。返回小写地址或 null(零地址/取不到)。
+ * engine 两段式准入：seen 池先按不同 txHash 数预筛，够 admission 才调此解析，绝大多数冷池零 RPC。
+ */
+const TX_FROM_CACHE = new Map(); // txHashLower -> from(lower)（LRU：超上限删最旧）
+const TX_FROM_CACHE_MAX = 20000;
+export async function resolveV4TxFrom(chain, txHash) {
+  if (!txHash) return null;
+  const hash = txHash.toLowerCase();
+  if (TX_FROM_CACHE.has(hash)) return TX_FROM_CACHE.get(hash); // 命中(可能是 null，代表已确认无有效 from)
+  try {
+    recordTxFetch();
+    const tx = await httpClient(chain).getTransaction({ hash: txHash });
+    const from = (tx?.from || '').toLowerCase();
+    const account = (from && !/^0x0+$/.test(from)) ? from : null;
+    TX_FROM_CACHE.set(hash, account);
+    if (TX_FROM_CACHE.size > TX_FROM_CACHE_MAX) TX_FROM_CACHE.delete(TX_FROM_CACHE.keys().next().value);
+    return account;
+  } catch { return null; } // 拿不到 → 不缓存(留待下次重试)
 }
