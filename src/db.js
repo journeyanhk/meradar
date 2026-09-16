@@ -222,6 +222,12 @@ ensureColumns('candidates', [
   // 只读展示/告警/统计，不参与分级(evaluateTier)。不写时保留上轮值；setEntry 不动 updated_at(不干扰排序/归档)。
   ['entry_json', 'entry_json TEXT'],
   ['pool_fee_pct', 'pool_fee_pct REAL'],               // v4 池动态费率(%)：90.1% 等反狙击高费率池 → 可试仓硬拒 + 卡片显示
+  // Arc 发射台(arc-launchpad)元数据：token_uri=项目图/元数据链接；locker=LP 锁仓合约(存在=「LP 已锁」)；
+  // hook=该币 v4 hook(EIP1167 代理，自学习信任层)；fee_schedule=FeeConfig 原始 8 值 JSON(仅展示，实际费率仍取 Swap.fee)。
+  ['token_uri', 'token_uri TEXT'],
+  ['locker', 'locker TEXT'],
+  ['hook', 'hook TEXT'],
+  ['fee_schedule', 'fee_schedule TEXT'],
 ]);
 // trades 已有 price(成交时单价 USD)=price_at_trade，无需重复列；只补 mcap_at_trade：
 // 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
@@ -251,6 +257,9 @@ const stmt = {
   setCurveInfo: db.prepare(`UPDATE candidates SET quote_symbol=COALESCE(quote_symbol,@quote_symbol), max_raising=COALESCE(@max_raising,max_raising), launch_time=COALESCE(launch_time,@launch_time), updated_at=@updated_at WHERE key=@key`),
   // Pons：登记该币曲线合约地址（募集额靠读 curve 余额）。
   setCurve: db.prepare(`UPDATE candidates SET curve=@curve, updated_at=@updated_at WHERE key=@key`),
+  // Arc 发射台：补创建者(不覆盖已有)；补元数据(token_uri/locker/hook/fee_schedule，均只填空、不覆盖)。
+  setCreatorIfEmpty: db.prepare(`UPDATE candidates SET creator=COALESCE(creator,@creator), updated_at=@updated_at WHERE key=@key`),
+  setArcMeta: db.prepare(`UPDATE candidates SET token_uri=COALESCE(token_uri,@token_uri), locker=COALESCE(locker,@locker), hook=COALESCE(hook,@hook), fee_schedule=COALESCE(fee_schedule,@fee_schedule), updated_at=@updated_at WHERE key=@key`),
   // Pons 毕业事件(PoolGraduated)：暂无池地址(v4 定价见 M2b)，先记毕业时刻供新鲜度/前端「已毕业」态。
   markGraduated: db.prepare(`UPDATE candidates SET graduated=1, graduated_at=COALESCE(graduated_at,@updated_at), updated_at=@updated_at WHERE key=@key`),
   // 启动回灌 curve↔token 映射（Pons 实时订阅按 emitter=curve 反查 token）。
@@ -335,6 +344,7 @@ const stmt = {
   bumpTemplateHash: db.prepare(`INSERT INTO template_hashes (chain, hash, kind, first_seen, count) VALUES (@chain, @hash, @kind, @ts, 1) ON CONFLICT(chain, hash) DO UPDATE SET count = count + 1`),
   getTemplateHashCount: db.prepare(`SELECT count FROM template_hashes WHERE chain=? AND hash=?`),
   learnedTemplateHashes: db.prepare(`SELECT hash FROM template_hashes WHERE chain=? AND count>=?`),
+  learnedTemplateHashesByKind: db.prepare(`SELECT hash FROM template_hashes WHERE chain=? AND kind=? AND count>=?`),
   upsertQuoteToken: db.prepare(`INSERT INTO quote_tokens (chain, address, symbol, decimals, first_seen) VALUES (@chain, @address, @symbol, @decimals, @ts) ON CONFLICT(chain, address) DO UPDATE SET symbol=@symbol, decimals=@decimals`),
   allQuoteTokens: db.prepare(`SELECT chain, address, symbol, decimals FROM quote_tokens`),
   upsertQuotePrice: db.prepare(`INSERT INTO quote_prices (chain, address, price_usd, liquidity_usd, priced, source, updated_at) VALUES (@chain, @address, @price_usd, @liquidity_usd, @priced, @source, @updated_at) ON CONFLICT(chain, address) DO UPDATE SET price_usd=@price_usd, liquidity_usd=@liquidity_usd, priced=@priced, source=@source, updated_at=@updated_at`),
@@ -401,6 +411,17 @@ export const store = {
     stmt.setCurveInfo.run({ key, quote_symbol, max_raising, launch_time, updated_at: Date.now() });
   },
   setCurve(key, curve) { stmt.setCurve.run({ key, curve: curve ? String(curve).toLowerCase() : null, updated_at: Date.now() }); },
+  setCreatorIfEmpty(key, creator) { stmt.setCreatorIfEmpty.run({ key, creator: creator ? String(creator).toLowerCase() : null, updated_at: Date.now() }); },
+  setArcMeta(key, { token_uri = null, locker = null, hook = null, fee_schedule = null } = {}) {
+    stmt.setArcMeta.run({
+      key,
+      token_uri: token_uri || null,
+      locker: locker ? String(locker).toLowerCase() : null,
+      hook: hook ? String(hook).toLowerCase() : null,
+      fee_schedule: fee_schedule ? (typeof fee_schedule === 'string' ? fee_schedule : JSON.stringify(fee_schedule)) : null,
+      updated_at: Date.now(),
+    });
+  },
   markGraduated(key, at = Date.now()) { stmt.markGraduated.run({ key, updated_at: at }); },
   curveTokens() { return stmt.curveTokens.all(); },
   promote(key) { return stmt.promote.run({ key, updated_at: Date.now() }).changes > 0; },
@@ -519,6 +540,7 @@ export const store = {
     return stmt.getTemplateHashCount.get(chain, h)?.count ?? 0;
   },
   learnedTemplateHashes(chain, minCount) { return stmt.learnedTemplateHashes.all(chain, minCount).map((r) => r.hash); },
+  learnedTemplateHashesByKind(chain, kind, minCount) { return stmt.learnedTemplateHashesByKind.all(chain, kind, minCount).map((r) => r.hash); },
   // 动态报价币登记 + 美元价缓存（quotePrice.js 用）。
   registerQuoteToken(chain, address, symbol, decimals) {
     stmt.upsertQuoteToken.run({ chain, address: String(address).toLowerCase(), symbol, decimals, ts: Date.now() });

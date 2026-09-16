@@ -18,8 +18,11 @@ const EIP1167 = /^0x363d3d373d3d3d363d73([0-9a-f]{40})5af43d82803e903d91602b57fd
 const LEARN_THRESHOLD = 20; // 同一码哈希被 ≥20 个平台部署币复用 → 自动进白名单
 
 const codeCache = new Map();      // `${chain}:${addr}` -> { proxyHash, implHash } | null(空码)。字节码不可变，永久缓存
-const learnedByChain = new Map(); // chain -> Set<hash>（count≥阈值的已学习哈希，惰性从库加载 + 学习时增量）
+const learnedByChain = new Map(); // chain -> Set<hash>（count≥阈值的已学习模板哈希，惰性从库加载 + 学习时增量）
+const learnedHooksByChain = new Map(); // chain -> Set<hash>（v4hook 专用，与模板分 kind 存，避免混淆 health.learned 计数）
 const recentPromotes = [];        // { ts, known } 近 24h，用于 health.templateUnknownRate
+const recentHooks = [];           // { ts, trust } 近 24h，用于 health.hooks(known/unknown/none)
+const HOOK_KIND = 'v4hook';
 
 function staticSet(chain) {
   return new Set((chainConfig(chain).templateCodeHashes || []).map((h) => h.toLowerCase()));
@@ -27,6 +30,11 @@ function staticSet(chain) {
 function learnedSet(chain) {
   let s = learnedByChain.get(chain);
   if (!s) { s = new Set(store.learnedTemplateHashes(chain, LEARN_THRESHOLD).map((h) => h.toLowerCase())); learnedByChain.set(chain, s); }
+  return s;
+}
+function learnedHookSet(chain) {
+  let s = learnedHooksByChain.get(chain);
+  if (!s) { s = new Set(store.learnedTemplateHashesByKind(chain, HOOK_KIND, LEARN_THRESHOLD).map((h) => h.toLowerCase())); learnedHooksByChain.set(chain, s); }
   return s;
 }
 function whitelisted(chain, hashes) {
@@ -86,6 +94,41 @@ export async function learnTemplate(chain, address) {
   }
 }
 
+// TokenDeployed 时调用：累计该币 v4 hook 的实现码哈希频次(kind='v4hook')，count≥阈值自动进白名单。
+// Arc per-token hook 是 EIP1167 代理指向同一实现合约 → implHash 稳定，几十次发射即达阈值；
+// 与模板同表(template_hashes)但独立 kind。hook 由发射台部署、创建者无法注入代码，计数即「平台统一 hook」证据。
+export async function learnHook(chain, hook) {
+  if (!hook || /^0x0+$/.test(hook)) return;
+  let h;
+  try { h = await codeHashes(chain, hook); } catch { h = undefined; }
+  if (!h) return;
+  const primary = h.implHash || h.proxyHash; // 实现码哈希优先(稳定层，抗每币代理地址差异)
+  const count = store.bumpTemplateHash(chain, primary, HOOK_KIND);
+  const learn = learnedHookSet(chain);
+  if (count >= LEARN_THRESHOLD && !learn.has(primary)) {
+    learn.add(primary);
+    log.info({ chain, hash: primary, count }, '新 v4 hook 已学习');
+  }
+}
+
+// 打分/升级时调用：只读判定该币 v4 hook 的信任度。返回 'known' | 'unknown' | 'none'。
+//   none    = 无 hook(0x0/空) → 走既有未核验路径
+//   known   = hook 实现码哈希 ∈ 已学习 v4hook 白名单(或静态) → 视同平台统一 hook，PASS
+//   unknown = 取到码但未进白名单(可能是自定义/恶意 hook) → 调用方封顶 WAIT·T1
+export async function checkHookTrust(chain, hook) {
+  if (!hook || /^0x0+$/.test(hook)) { recordHook('none'); return 'none'; }
+  let h;
+  try { h = await codeHashes(chain, hook); } catch { h = undefined; }
+  if (!h) { recordHook('unknown'); return 'unknown'; }
+  const primary = h.implHash || h.proxyHash;
+  const known = learnedHookSet(chain).has(primary) || staticSet(chain).has(primary);
+  const trust = known ? 'known' : 'unknown';
+  recordHook(trust);
+  return trust;
+}
+
+function recordHook(trust) { recentHooks.push({ ts: Date.now(), trust }); }
+
 // promote 时调用：只记近 24h「哈希未知」比例供 health（不再计数，计数已移到 TokenCreate 抽样）。
 // 返回 promote 时是否「已知模板」。
 export async function recordPromotedTemplate(chain, address) {
@@ -104,7 +147,13 @@ export function templateHealth() {
   const unknown = recentPromotes.reduce((a, r) => a + (r.known ? 0 : 1), 0);
   const learned = {};
   for (const [c, s] of learnedByChain) learned[c] = s.size;
-  return { promoted24h: n, templateUnknownRate: n ? Number((unknown / n).toFixed(3)) : 0, learned };
+  const learnedHooks = {};
+  for (const [c, s] of learnedHooksByChain) learnedHooks[c] = s.size;
+  const hookCutoff = cutoff;
+  while (recentHooks.length && recentHooks[0].ts < hookCutoff) recentHooks.shift();
+  const hooks = { known: 0, unknown: 0, none: 0 };
+  for (const r of recentHooks) hooks[r.trust] = (hooks[r.trust] || 0) + 1;
+  return { promoted24h: n, templateUnknownRate: n ? Number((unknown / n).toFixed(3)) : 0, learned, learnedHooks, hooks };
 }
 
 // 供单测/诊断

@@ -2,6 +2,7 @@ import { parseAbiItem, formatUnits } from 'viem';
 import { wsClient, httpClient } from './chain.js';
 import { chainConfig } from './config.js';
 import { fourMemeEvents, swapEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents, v4SwapEvent, v4InitializeEvent } from './abi.js';
+import { decodeArcLaunchpadLog } from './arc-launchpad.js';
 import { recordWsLog, recordRpcError, recordTxFetch } from './health.js';
 import { child } from './logger.js';
 
@@ -55,6 +56,25 @@ export function watchChain(chain, handlers) {
 
     if (!lp.address || /^0x0+$/.test(lp.address)) {
       log.warn({ chain, launchpad: lp.id }, '工厂地址未配置，跳过（待核实后填入 config.json）');
+      continue;
+    }
+
+    if (lp.type === 'arc-launchpad') {
+      // Arc 发射台：单合约、每次发射四事件同 tx。签名不确证 → 订阅地址全量日志、按 topic0 解码(src/arc-launchpad.js)。
+      const un = client.watchEvent({
+        address: lp.address,
+        strict: false,
+        onLogs: (logs) => {
+          recordWsLog(chain);
+          for (const l of logs) {
+            try { routeArcLaunchpad(chain, lp, l, handlers); }
+            catch (e) { log.debug({ err: e.message }, 'arc-launchpad 事件解码失败'); }
+          }
+        },
+        onError: (e) => { recordRpcError(); log.warn({ chain, launchpad: lp.id, err: e.message }, 'watchEvent 错误(自动重连)'); },
+      });
+      unwatchers.push(un);
+      log.info({ chain, launchpad: lp.id, address: lp.address }, '订阅 Arc 发射台事件流');
       continue;
     }
 
@@ -138,6 +158,22 @@ export function watchChain(chain, handlers) {
   }
 
   return () => unwatchers.forEach((u) => { try { u(); } catch { /* noop */ } });
+}
+
+// Arc 发射台四事件 → 对应 handler。token=topics[1](公共键)。见 src/arc-launchpad.js decodeArcLaunchpadLog。
+function routeArcLaunchpad(chain, lp, l, handlers) {
+  const d = decodeArcLaunchpadLog(l);
+  if (!d) return;
+  const base = { chain, address: d.token, launchpad: lp.id, label: lp.label, block: d.block, tx: d.tx };
+  if (d.kind === 'launch') {
+    handlers.onArcLaunch?.({ ...base, creator: d.creator, name: d.name, symbol: d.symbol, uri: d.uri, salt: d.salt, ts: Date.now() });
+  } else if (d.kind === 'pool') {
+    handlers.onArcPool?.({ ...base, poolId: d.poolId });
+  } else if (d.kind === 'deployed') {
+    handlers.onArcDeployed?.({ ...base, locker: d.locker, v4hook: d.v4hook, controller: d.controller });
+  } else if (d.kind === 'fee') {
+    handlers.onArcFee?.({ ...base, schedule: d.schedule });
+  }
 }
 
 function routeFourMeme(chain, lp, l, handlers) {

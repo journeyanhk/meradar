@@ -5,10 +5,11 @@ import { store } from './db.js';
 import { config, chainConfig, admissionFor } from './config.js';
 import { httpClient, logsClient, getSecPerBlock, estimateTsFromBlock } from './chain.js';
 import { fourMemeEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents, v4InitializeEvent } from './abi.js';
+import { decodeArcLaunchpadLog } from './arc-launchpad.js';
 import { bus, Events } from './bus.js';
 import { startTracker } from './track.js';
 import { discoverPool } from './pool.js';
-import { learnTemplate, recordPromotedTemplate } from './template.js';
+import { learnTemplate, recordPromotedTemplate, learnHook } from './template.js';
 import * as momentum from './momentum.js';
 import { recordPoolState } from './poolstate.js';
 import { recordSeen, recordPromoted, recordTradeWrite, setSwapPools } from './health.js';
@@ -278,7 +279,7 @@ async function onSwap(sw) {
 // —— Arc pool-first：从「新建池」登记新币 + 升级 ——
 // discoverFromPools 链上，一侧是已知报价币、另一侧未登记 → 未登记方即新 meme，登记为 seen 且「已毕业」态
 // (有池即毕业)。graduated_at 用建池块时间近似(供新鲜度门)。不跑曲线/模板分支(cand.pool 已设 → track 天然跳过)。
-async function registerSeenFromPool({ chain, address, launchpad, block }) {
+async function registerSeenFromPool({ chain, address, launchpad, block, name = null, symbol = null, creator = null }) {
   const key = `${chain}:${address.toLowerCase()}`;
   if (store.get(key)) return true;
   const meta = await readToken(chain, address).catch(() => null);
@@ -287,10 +288,12 @@ async function registerSeenFromPool({ chain, address, launchpad, block }) {
   const gradTs = block ? estimateTsFromBlock(chain, block) : now;
   const inserted = store.addCandidate({
     key, chain, address, launchpad: launchpad || 'pool',
-    name: (meta.name || '').slice(0, 80) || null,
-    symbol: (meta.symbol || '').slice(0, 32) || null,
+    // 发射台事件带来的 name/symbol 优先(零 RPC、与链上元数据一致)，否则用 readToken 兜底。
+    name: (name || meta.name || '').slice(0, 80) || null,
+    symbol: (symbol || meta.symbol || '').slice(0, 32) || null,
     decimals: meta.decimals ?? 18,
-    total_supply: meta.totalSupply?.toString() ?? null, creator: null,
+    total_supply: meta.totalSupply?.toString() ?? null,
+    creator: creator ? String(creator).toLowerCase() : null,
     pool: null, pool_type: null, quote_symbol: null,
     launch_time: gradTs, status: 'seen', discovered_at: now, updated_at: now,
   });
@@ -424,6 +427,59 @@ async function onV4Initialize(i) {
   log.info({ chain: i.chain, token: meme, poolId: i.poolId, tickSpacing: i.tickSpacing }, 'Pons v4 池 Initialize(二级来源)，已接 v4 定价');
 }
 
+// ── Arc 发射台(arc-launchpad) 四事件 handler ──────────────────────────────────────────────
+// 每次发射四事件同 tx。onArcLaunch 是主登记(元数据零 RPC)；v4 池定价仍由 onV4Initialize 负责
+// (主流报价腿=USDC 0x3600 已在 quoteSet)。onArcPool 作 poolId↔token 冗余链路；
+// onArcDeployed 记 locker(「LP 已锁」) + 真实 v4 hook(data[1]，每币唯一) + 用稳定代理(data[2]) 学习平台信任层；
+// onArcFee 记原始费率表(仅展示，实际费率取 Swap.fee)。
+async function onArcLaunch(c) {
+  const addr = (c.address || '').toLowerCase();
+  if (!addr || /^0x0+$/.test(addr)) return;
+  const key = `${c.chain}:${addr}`;
+  const existed = !!store.get(key);
+  const ok = await registerSeenFromPool({
+    chain: c.chain, address: addr, launchpad: c.launchpad || 'arc-launchpad',
+    block: c.block, name: c.name, symbol: c.symbol, creator: c.creator,
+  });
+  if (!ok) return;
+  if (existed && c.creator) store.setCreatorIfEmpty(key, c.creator); // 元数据晚到：补创建者
+  if (c.uri) store.setArcMeta(key, { token_uri: c.uri });
+  bus.emit(Events.UPDATE, { ...store.get(key) });
+}
+
+async function onArcPool(c) {
+  const meme = (c.address || '').toLowerCase();
+  if (!c.poolId || !meme || /^0x0+$/.test(meme)) return;
+  const key = `${c.chain}:${meme}`;
+  if (!store.get(key)) {
+    if (!(await registerSeenFromPool({ chain: c.chain, address: meme, launchpad: c.launchpad || 'arc-launchpad', block: c.block }))) return;
+  }
+  // 冗余登记 token↔poolId(不含 currency/quote，留给 Initialize COALESCE 补齐真实报价腿与费率)。
+  store.upsertV4Pool({ chain: c.chain, pool_id: c.poolId, token: meme, source: 'launchpad', block: c.block, tx: c.tx });
+}
+
+async function onArcDeployed(c) {
+  const addr = (c.address || '').toLowerCase();
+  if (!addr || /^0x0+$/.test(addr)) return;
+  const key = `${c.chain}:${addr}`;
+  if (!store.get(key)) {
+    if (!(await registerSeenFromPool({ chain: c.chain, address: addr, launchpad: c.launchpad || 'arc-launchpad', block: c.block }))) return;
+  }
+  // locker=data[0](LP 锁仓，展示「LP 已锁」)；hook 列存 data[2]=controller=稳定 EIP1167 代理(平台统一实现，checkHookTrust 判据)。
+  // 真实 v4 PoolKey.hooks=data[1](v4hook，每币唯一、不可哈希学习)，由 v4_pools.hooks(Initialize)承载。
+  store.setArcMeta(key, { locker: c.locker, hook: c.controller || null });
+  // 用稳定 controller(data[2]) 学习平台信任层(kind='v4hook')：implHash 稳定，几十次发射即达阈值。
+  learnHook(c.chain, c.controller).catch((e) => log.debug({ err: e.message }, 'learnHook'));
+}
+
+async function onArcFee(c) {
+  const addr = (c.address || '').toLowerCase();
+  if (!addr || /^0x0+$/.test(addr)) return;
+  const key = `${c.chain}:${addr}`;
+  if (!store.get(key)) return; // 费率不触发登记，缺候选则忽略
+  if (Array.isArray(c.schedule) && c.schedule.length) store.setArcMeta(key, { fee_schedule: c.schedule });
+}
+
 // AMM 建池 / 毕业：补池子地址与类型，供 track 定价，并重建成交订阅。
 // discoverFromPools 链(Arc)：未登记的新对且恰有一侧是已知报价币 → pool-first 登记为新币(seen·已毕业)。
 async function onAmm(c) {
@@ -534,6 +590,52 @@ export async function backfillRecentCreates(chain, hours = 2) {
   if (cfg.discoverFromPools && cfg.poolManagerV4 && !/^0x0+$/.test(cfg.poolManagerV4)) {
     count += await backfillV4Initialize(chain, hours).catch((e) => { log.warn({ chain, err: e.message }, 'Arc Initialize 回填失败(忽略)'); return 0; });
   }
+  // Arc 发射台：回填最近 ~hours 小时的四事件——补元数据(name/symbol/creator/uri) + locker + 学习 hook 信任层。
+  const arcLp = cfg.launchpads?.find((l) => l.type === 'arc-launchpad' && l.address && !/^0x0+$/.test(l.address));
+  if (arcLp) {
+    count += await backfillArcLaunchpad(chain, arcLp, hours).catch((e) => { log.warn({ chain, err: e.message }, 'Arc 发射台回填失败(忽略)'); return 0; });
+  }
+  return count;
+}
+
+// Arc 发射台启动回填：分段 1500 块拉发射台全量日志，逐条经 decodeArcLaunchpadLog 分派到四 handler。
+// 与 Initialize 回填互补：Initialize 负责池定价，此处补元数据/locker/hook 学习(hook 白名单冷启动预热)。
+async function backfillArcLaunchpad(chain, lp, hours = 2) {
+  const client = logsClient(chain);
+  let latest;
+  try { latest = await client.getBlockNumber(); } catch (e) { log.warn({ chain, err: e.message }, 'Arc 发射台回填取块高失败'); return 0; }
+  const blocksPerHour = Math.round(3600 / getSecPerBlock(chain));
+  const span = BigInt(blocksPerHour * hours);
+  const chunk = 1500n;
+  let from = latest > span ? latest - span : 0n;
+  let count = 0;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  while (from <= latest) {
+    const to = from + chunk - 1n > latest ? latest : from + chunk - 1n;
+    let logs = null;
+    for (let attempt = 0; attempt < 3 && logs === null; attempt++) {
+      try { logs = await client.getLogs({ address: lp.address, fromBlock: from, toBlock: to }); }
+      catch (e) {
+        if (attempt === 2) log.debug({ chain, from: from.toString(), err: e.message }, 'Arc 发射台回填分段失败(跳过，靠实时订阅兜底)');
+        else await sleep(600 * (attempt + 1));
+      }
+    }
+    for (const l of logs || []) {
+      const d = decodeArcLaunchpadLog(l);
+      if (!d) continue;
+      const base = { chain, address: d.token, launchpad: lp.id, label: lp.label, block: Number(l.blockNumber || 0), tx: l.transactionHash };
+      try {
+        if (d.kind === 'launch') await onArcLaunch({ ...base, creator: d.creator, name: d.name, symbol: d.symbol, uri: d.uri, salt: d.salt });
+        else if (d.kind === 'pool') await onArcPool({ ...base, poolId: d.poolId });
+        else if (d.kind === 'deployed') await onArcDeployed({ ...base, locker: d.locker, v4hook: d.v4hook, controller: d.controller });
+        else if (d.kind === 'fee') await onArcFee({ ...base, schedule: d.schedule });
+        count++;
+      } catch { /* 单条失败跳过 */ }
+    }
+    from = to + 1n;
+    await sleep(200);
+  }
+  log.info({ chain, count, hours }, 'Arc 发射台启动回填完成');
   return count;
 }
 
@@ -772,6 +874,10 @@ export function startEngine() {
         onSweep: (s) => onSweep(s).catch((e) => log.debug({ err: e.message }, 'onSweep')),
         onPoolRegistered: (p) => onPoolRegistered(p).catch((e) => log.debug({ err: e.message }, 'onPoolRegistered')),
         onV4Initialize: (i) => onV4Initialize(i).catch((e) => log.debug({ err: e.message }, 'onV4Initialize')),
+        onArcLaunch: (c) => onArcLaunch(c).catch((e) => log.debug({ err: e.message }, 'onArcLaunch')),
+        onArcPool: (c) => onArcPool(c).catch((e) => log.debug({ err: e.message }, 'onArcPool')),
+        onArcDeployed: (c) => onArcDeployed(c).catch((e) => log.debug({ err: e.message }, 'onArcDeployed')),
+        onArcFee: (c) => onArcFee(c).catch((e) => log.debug({ err: e.message }, 'onArcFee')),
       });
       // 启动时按库中已有的毕业池建一次订阅（覆盖重启前已毕业的活跃币）
       try { rebuildSwaps(chain); } catch (e) { log.debug({ err: e.message }, 'rebuildSwaps(启动)'); }

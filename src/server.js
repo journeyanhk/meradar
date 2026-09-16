@@ -98,6 +98,9 @@ function decorate(c) {
     liquidityWithdrawn: !!(c.graduated && c.pool && (c.price_usd || 0) === 0 && (c.depth_usd || 0) === 0),
     depthUsd: c.depth_usd || 0, depthKind: c.depth_kind || 'curve', offersPct: c.offers_pct || 0,
     poolFeePct: c.pool_fee_pct ?? null,
+    lpLocked: !!c.locker,          // Arc 发射台：LP 锁仓合约存在 → 前端「LP 已锁」badge
+    tokenUri: c.token_uri || null, // 项目图/元数据链接(Arc 发射台)
+    feeSchedule: safeParse(c.fee_schedule), // FeeConfig 原始 8 值(仅展示，实际费率取 poolFeePct)
     curveProgressPct: c.curve_progress_pct || 0, quoteSymbol: c.quote_symbol || null,
     peakMcapUsd: peak, drawdownPct,
     netIn30m: c.net_in_30m || 0, netIn1h: c.net_in_1h || 0,

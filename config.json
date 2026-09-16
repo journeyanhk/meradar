@@ -148,6 +148,13 @@
       },
       "launchpads": [
         {
+          "id": "arc-launchpad",
+          "type": "arc-launchpad",
+          "label": "Arc",
+          "address": "0xb021be536808f551b31789422fd28a6c9c6e97da",
+          "note": "Arc 主网发射台(单合约、每次发射四事件同 tx，已链上核实 scripts/verify-arc-launchpad.mjs)：TokenLaunched(元数据 name/symbol/creator/uri)、PoolCreated(token↔poolId 主源)、TokenDeployed(locker/registry/hook)、FeeConfig(原始费率表)。地址订阅全量日志、按 topic0 解码(见 src/arc-launchpad.js)。PoolManager.Initialize 为辅源。per-token hook 是 EIP1167 代理指向统一实现 → hook 实现码哈希自学习进 template_hashes(kind='v4hook')，≥20 次视为平台统一 hook(PASS)，未知 hook→WAIT·T1；locker 记录并显示「LP 已锁」。"
+        },
+        {
           "id": "arc-uniV3",
           "type": "amm-v3",
           "label": "Uniswap V3 (Arc)",

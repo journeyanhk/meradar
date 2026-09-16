@@ -109,6 +109,7 @@ function cardHtml(d) {
   if (d.copycats >= 3) tags.push(`<span class="tag">仿盘${d.copycats}</span>`);
   const badges = [`<span class="badge chain chain-${esc(d.chain)}">${chainLabel(d.chain)}</span>`, `<span class="badge ${d.tier}">${d.tier}</span>`];
   if (d.graduated) badges.push('<span class="badge grad">毕业</span>');
+  if (d.lpLocked) badges.push('<span class="badge lplock" title="LP 锁仓合约存在">LP 已锁</span>');
   // 高费率池(Arc 反狙击 90.1% 等)：显红标提醒，进去必被高费吃穿。
   if (d.poolFeePct != null && d.poolFeePct > 10) badges.push(`<span class="badge feehigh" title="池动态费率">费率 ${(+d.poolFeePct).toFixed(1)}%</span>`);
   // 可试仓 v1：满足小资金试仓门时显绿标(A/B + 建议仓位)，供快速筛选。

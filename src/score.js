@@ -2,7 +2,7 @@ import { chainConfig, config, allowUnverifiedStrongFor } from './config.js';
 import { store } from './db.js';
 import { goplusCheck } from './goplus.js';
 import { roundTripCheck } from './roundtrip.js';
-import { matchesTemplate } from './template.js';
+import { matchesTemplate, checkHookTrust } from './template.js';
 import { child } from './logger.js';
 
 const log = child('score');
@@ -68,8 +68,18 @@ export async function evaluateTradeSafety(chain, cand, { wantFresh = false, grad
     goplus = await goplusCheck(cfg.goplusId, cand.address).catch(() => null);
   }
 
+  // Arc 发射台 v4 hook 信任层：毕业后 v4 往返尚不支持(unsupported)，用 hook(=稳定 controller 代理)是否命中
+  // 已学习平台实现 判信任。known=平台统一实现→PASS(factory)；unknown=可能自定义→WAIT·T1；none/无→落既有豁免路径。
+  let hookTrust = null;
+  if (graduated && cand.pool_type === 'v4' && cand.hook) {
+    hookTrust = await checkHookTrust(chain, cand.hook).catch((e) => {
+      log.debug({ err: e.message, token: cand.symbol }, 'checkHookTrust 异常');
+      return null;
+    });
+  }
+
   const cls = classifyTradeSafety({
-    graduated, graduating, platformDeployed, templateMatch, roundTrip, goplus,
+    graduated, graduating, platformDeployed, templateMatch, roundTrip, goplus, hookTrust,
     allowUnverifiedStrong: allowUnverifiedStrongFor(chain), rejectSellTaxBps: REJECT_SELL_TAX_BPS,
   });
   return {
@@ -93,7 +103,7 @@ export async function evaluateTradeSafety(chain, cand, { wantFresh = false, grad
  *   goplus        { isHoneypot, cannotSellAll, sellTaxBps, naFields } | null
  * 返回 { state, source, capTier, sellTaxBps?, naFields?, softFlags?, reason?, note? }
  */
-export function classifyTradeSafety({ graduated, graduating = false, platformDeployed = false, templateMatch, roundTrip, goplus, allowUnverifiedStrong = false, rejectSellTaxBps = REJECT_SELL_TAX_BPS }) {
+export function classifyTradeSafety({ graduated, graduating = false, platformDeployed = false, templateMatch, roundTrip, goplus, hookTrust = null, allowUnverifiedStrong = false, rejectSellTaxBps = REJECT_SELL_TAX_BPS }) {
   const na = new Set(goplus?.naFields || []);
   const gpHoneypot = !!goplus && goplus.isHoneypot === true && !na.has('isHoneypot');
   const gpCannotSell = !!goplus && goplus.cannotSellAll === true && !na.has('cannotSellAll');
@@ -155,6 +165,15 @@ export function classifyTradeSafety({ graduated, graduating = false, platformDep
     gpCannotSellKnown && goplus.cannotSellAll === false &&
     gpTaxKnown && goplus.sellTaxBps < rejectSellTaxBps;
   if (gpClean) return { state: 'PASS', source: 'goplus', capTier: null, sellTaxBps: goplus.sellTaxBps, note: 'GoPlus' };
+
+  // 毕业后 v4 往返不可用(null/unsupported)时的 hook 信任层(Arc 发射台)：
+  //   known   = hook(稳定 controller) 命中已学习平台实现 → 视同平台工厂部署，PASS(factory)。
+  //   unknown = 取到码但未进白名单(可能自定义 hook) → WAIT 封顶 T1，退避到 hook 被学习/往返实现。
+  //   none/null = 无 hook 或非 Arc v4 → 落既有 allowUnverifiedStrong 豁免路径，零回归。
+  if (graduated && (roundTrip == null || roundTrip.status === 'unsupported')) {
+    if (hookTrust === 'known') return { state: 'PASS', source: 'factory', capTier: null, naFields: ['sellTax', 'cannotSellAll'], note: '毕业后·平台 hook(已学习)' };
+    if (hookTrust === 'unknown') return { state: 'WAIT', source: 'hook', capTier: 'T1', softFlags: ['hook 未知'], note: 'hook 未知，退避复查' };
+  }
 
   // 毕业后无往返路径(v4 未实现→unsupported) 且该链开启收紧版豁免：放行强提示但不封顶，标未核验。
   // 依据：Pons 池 LP 永久锁定、hook 透明收费、fee=0，毕业后貔貅风险低。到期(config until)后自动回落 WAIT/T1。
