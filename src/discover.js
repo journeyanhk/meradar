@@ -3,7 +3,7 @@ import { wsClient, httpClient } from './chain.js';
 import { chainConfig } from './config.js';
 import { fourMemeEvents, swapEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents, v4SwapEvent, v4InitializeEvent } from './abi.js';
 import { decodeArcLaunchpadLog } from './arc-launchpad.js';
-import { recordWsLog, recordRpcError, recordTxFetch } from './health.js';
+import { recordWsLog, recordRpcError, recordTxFetch, recordSubEvent, recordSubError, recordSubRebuild } from './health.js';
 import { child } from './logger.js';
 
 const log = child('discover');
@@ -14,22 +14,31 @@ const log = child('discover');
  * onError 只回调、不重试 —— 订阅就此静默失联（Arc 曾整链无数据的直接原因）。
  * 本包装：onError → 取消旧订阅 → 指数退避(2s→4s→…→60s) → 重新 watchEvent。
  * makeParams() 返回传给 client.watchEvent 的参数（不含 onError；onLogs 会被包裹以在有数据时重置退避）。
+ * opts.staleMs>0 时启用看门狗(方案0-3)：连续该毫秒数无事件到达 → 判定订阅静默(节点悄悄丢弃了推流、
+ *   socket 未断故 onError 不触发) → warn `subscription_stalled` + 强制重建。0=不看门(可长期空闲的订阅)。
  * 返回统一退订函数。
  */
-function watchWithReconnect(client, label, chain, makeParams) {
+function watchWithReconnect(client, label, chain, makeParams, opts = {}) {
+  const staleMs = opts.staleMs || 0;
   let un = null;
   let stopped = false;
   let attempt = 0;
   let timer = null;
+  let watchdog = null;
+  let lastEventAt = Date.now(); // 建订阅即视为“刚活着”，避免启动瞬间误判静默
+  let started = false; // 首次 subscribe 不计 rebuild，之后每次重建 +1
   const subscribe = () => {
     if (stopped) return;
+    if (started) recordSubRebuild(chain, label);
+    started = true;
     const params = makeParams();
     const origOnLogs = params.onLogs;
     un = client.watchEvent({
       ...params,
-      onLogs: (logs) => { attempt = 0; origOnLogs?.(logs); }, // 有数据流入即视为健康 → 退避归零
+      onLogs: (logs) => { attempt = 0; lastEventAt = Date.now(); recordSubEvent(chain, label); origOnLogs?.(logs); }, // 有数据流入即视为健康 → 退避归零
       onError: (e) => {
         recordRpcError();
+        recordSubError(chain, label);
         log.warn({ chain, label, err: e.message, attempt }, '订阅出错 → 退避重建(viem 不会自行重试被拒的 eth_subscribe)');
         try { un?.(); } catch { /* noop */ }
         un = null;
@@ -40,8 +49,21 @@ function watchWithReconnect(client, label, chain, makeParams) {
       },
     });
   };
+  const forceRebuild = () => {
+    if (stopped || timer) return; // 退避排程中不插手，交给退避链路
+    log.warn({ chain, label, staleSec: Math.round((Date.now() - lastEventAt) / 1000), staleMs }, 'subscription_stalled → 强制重建');
+    try { un?.(); } catch { /* noop */ }
+    un = null;
+    lastEventAt = Date.now(); // 重置计时，给新订阅一个完整窗口
+    subscribe();
+  };
   subscribe();
-  return () => { stopped = true; if (timer) clearTimeout(timer); try { un?.(); } catch { /* noop */ } };
+  if (staleMs > 0) {
+    const period = Math.max(15000, Math.floor(staleMs / 4)); // 检查间隔取阈值 1/4，最低 15s
+    watchdog = setInterval(() => { if (!stopped && Date.now() - lastEventAt > staleMs) forceRebuild(); }, period);
+    if (typeof watchdog.unref === 'function') watchdog.unref(); // 不阻塞进程退出
+  }
+  return () => { stopped = true; if (timer) clearTimeout(timer); if (watchdog) clearInterval(watchdog); try { un?.(); } catch { /* noop */ } };
 }
 
 // Pons(curve-per-token)：curve 合约地址 → 代币地址 的映射。
@@ -125,7 +147,7 @@ export function watchChain(chain, handlers) {
             catch (e) { log.debug({ err: e.message }, 'fourmeme 事件解码失败'); }
           }
         },
-      }));
+      }), { staleMs: chain === 'bsc' ? 600_000 : 0 }); // 看门狗(方案0-3)：BSC TokenCreate 十分钟无事件必属异常
       unwatchers.push(un);
       log.info({ chain, launchpad: lp.id, address: lp.address }, '订阅 Four.meme 事件流');
       continue;
@@ -184,7 +206,7 @@ export function watchChain(chain, handlers) {
           } catch (e) { log.debug({ err: e.message }, 'v4 Initialize 解码失败'); }
         }
       },
-    }));
+    }), { staleMs: chain === 'arc' ? 120_000 : 0 }); // 看门狗(方案0-3)：Arc 池创建主入口，2 分钟静默即重建
     unwatchers.push(un);
     log.info({ chain, poolManager: cfg.poolManagerV4 }, '订阅 Pons v4 PoolManager.Initialize(二级来源)');
   }
@@ -227,6 +249,7 @@ function routeFourMeme(chain, lp, l, handlers) {
       price: a.price ?? null, amount: a.amount ?? null, cost: a.cost ?? null,
       offers: a.offers ?? null, funds: a.funds ?? null,
       block: Number(l.blockNumber || 0), // M2c：同块多买=bot 判定
+      tx: l.transactionHash, logIndex: l.logIndex, // 幂等键(方案0-1)：防双订阅重复计
       isBuy: name === 'TokenPurchase', ts: Date.now(),
     });
   }
@@ -249,7 +272,7 @@ function subscribePonsCurve(chain, lp, client, handlers, unwatchers) {
         recordWsLog(chain);
         for (const l of logs) { try { routePonsFactory(chain, lp, l, handlers); } catch (e) { log.debug({ err: e.message }, 'pons 工厂事件解码失败'); } }
       },
-    }));
+    }), { staleMs: 120_000 }); // 看门狗(方案0-3)：Pons 工厂是新币主入口，2 分钟静默即重建
     unwatchers.push(un);
     log.info({ chain, launchpad: lp.id, factory: lp.factory }, '订阅 Pons 工厂事件(TokenLaunched/PoolGraduated/LaunchSwept)');
   }
@@ -324,6 +347,7 @@ function routePonsCurve(chain, lp, l, handlers) {
     price, amount: tokenRaw, cost: quoteRaw, offers: null, funds: null,
     fee: a.fee ?? null, tax: a.tax ?? null, // 曲线自带手续费/税(报价币最小单位)，落库供 M2c/M4
     block: Number(l.blockNumber || 0), // M2c：同块多买=bot 判定
+    tx: l.transactionHash, logIndex: l.logIndex, // 幂等键(方案0-1)：防双订阅重复计
     isBuy, ts: Date.now(),
   });
 }
@@ -388,7 +412,7 @@ export function normalizeSwap(l, p, chain) {
   // ts 使用 Date.now()：本函数只服务实时订阅路径（swap 到达即处理），偏差可忽略。
   // ⚠️ 若将来新增「历史 Swap 回填」，勿复用此处的 Date.now()——需按块高估算
   //    ts = now − (latest − blockNumber) × 区块间隔，与 backfill 中曲线成交的口径一致。
-  return { chain, address: p.token, account, side, quoteHuman, quoteSym: p.quoteSym, tokenHuman, block: Number(l.blockNumber || 0), ts: Date.now() };
+  return { chain, address: p.token, account, side, quoteHuman, quoteSym: p.quoteSym, tokenHuman, block: Number(l.blockNumber || 0), txHash: l.transactionHash, logIndex: l.logIndex, ts: Date.now() };
 }
 
 /**
@@ -451,7 +475,7 @@ export function subscribeV4SwapsFull(chain, poolManager, getMeta, onSwap) {
       if (!meta || meta.size === 0) return;
       for (const l of logs) dispatchV4Swap(l, meta, chain, onSwap);
     },
-  }));
+  }), { staleMs: 120_000 }); // 看门狗(方案0-3)：Arc 全量成交订阅，2 分钟无 Swap 即重建
   log.info({ chain }, '建立 v4 全量成交订阅(PoolManager 单订阅, 本地 poolId 过滤)');
   return () => { try { un(); } catch { /* noop */ } };
 }
@@ -483,7 +507,7 @@ export function normalizeSwapV4(l, p, chain) {
   const tokenHuman = Number(formatUnits(c.tokenRaw, p.tokenDecimals || 18));
   // sqrtPriceX96/liquidity 随 Swap 事件到达 → 供 onSwap 写 poolState，实现事件驱动定价(零 RPC)。
   return {
-    chain, address: p.token, account: null, txHash: l.transactionHash || null,
+    chain, address: p.token, account: null, txHash: l.transactionHash || null, logIndex: l.logIndex,
     side: c.side, quoteHuman, quoteSym: p.quoteSym,
     tokenHuman, block: Number(l.blockNumber || 0), ts: Date.now(),
     pool: p.poolId, poolType: 'v4', sqrtPriceX96: a.sqrtPriceX96, liquidity: a.liquidity, tick: a.tick,

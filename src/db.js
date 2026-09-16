@@ -245,7 +245,14 @@ ensureColumns('trades', [
   ['tax_raw', 'tax_raw TEXT'],
   // M2c：成交所在区块。买家分级「同块 ≥3 笔=bot」需要；仅实时路径写入(回填只喂 momentum)，历史行为 NULL。
   ['block', 'block INTEGER'],
+  // 成交幂等键(方案0-1)：chain + 事件坐标(txHash:logIndex)。双订阅/回填重叠/重启重放导致同一 Swap 二次入库时，
+  // 靠 uq_trades_evt 去重(INSERT OR IGNORE)，防放量/净流入/买卖比虚高。历史行三列为 NULL(SQLite 视 NULL 互不相等，不阻塞)。
+  ['chain', 'chain TEXT'],
+  ['tx_hash', 'tx_hash TEXT'],
+  ['log_index', 'log_index INTEGER'],
 ]);
+// 成交事件唯一索引：同一(链, txHash, logIndex)只允许一行。NULL 互不相等 → 历史 NULL 行不冲突，迁移不失败。
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS uq_trades_evt ON trades(chain, tx_hash, log_index)');
 
 const stmt = {
   upsertCandidate: db.prepare(`
@@ -318,8 +325,21 @@ const stmt = {
       SUM(CASE WHEN discovered_at >= ? THEN 1 ELSE 0 END) AS last24h
     FROM candidates
   `),
+  // 分链统计(方案0-5)：同口径但按链过滤，供 /api/stats?chain= 与前端「本链 N 个候选等待准入」。
+  statsByChain: db.prepare(`
+    SELECT COUNT(*) AS total,
+      SUM(CASE WHEN status='seen' THEN 1 ELSE 0 END) AS seen,
+      SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active,
+      SUM(CASE WHEN tier='T1' THEN 1 ELSE 0 END) AS t1,
+      SUM(CASE WHEN tier='T2' THEN 1 ELSE 0 END) AS t2,
+      SUM(CASE WHEN tier='T3' THEN 1 ELSE 0 END) AS t3,
+      SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected,
+      SUM(CASE WHEN discovered_at >= @since THEN 1 ELSE 0 END) AS last24h
+    FROM candidates WHERE chain = @chain
+  `),
   missedKills: db.prepare(`SELECT COUNT(*) AS missed FROM candidates WHERE status='rejected' AND peak_mcap_usd >= 1000000`),
-  insertTrade: db.prepare(`INSERT INTO trades (key, ts, side, account, quote_amount, token_amount, price, mcap_at_trade, fee_raw, tax_raw, block) VALUES (@key, @ts, @side, @account, @quote_amount, @token_amount, @price, @mcap_at_trade, @fee_raw, @tax_raw, @block)`),
+  missedKillsByChain: db.prepare(`SELECT COUNT(*) AS missed FROM candidates WHERE chain=? AND status='rejected' AND peak_mcap_usd >= 1000000`),
+  insertTrade: db.prepare(`INSERT OR IGNORE INTO trades (key, chain, ts, side, account, quote_amount, token_amount, price, mcap_at_trade, fee_raw, tax_raw, block, tx_hash, log_index) VALUES (@key, @chain, @ts, @side, @account, @quote_amount, @token_amount, @price, @mcap_at_trade, @fee_raw, @tax_raw, @block, @tx_hash, @log_index)`),
   lastTradeTs: db.prepare(`SELECT MAX(ts) AS ts FROM trades WHERE key=?`),
   deleteOldTrades: db.prepare(`DELETE FROM trades WHERE ts < ?`),
   countTrades: db.prepare(`SELECT COUNT(*) AS n FROM trades`),
@@ -462,8 +482,14 @@ export const store = {
   feed(limit = 200, chain = null) {
     return chain && chain !== 'all' ? stmt.listFeedByChain.all(chain, limit) : stmt.listFeed.all(limit);
   },
-  stats(since24h) { return { ...stmt.stats.get(since24h), missed: stmt.missedKills.get().missed }; },
-  addTrade(t) { stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, mcap_at_trade: null, fee_raw: null, tax_raw: null, block: null, ...t }); },
+  stats(since24h, chain = null) {
+    if (chain && chain !== 'all') {
+      return { ...stmt.statsByChain.get({ since: since24h, chain }), missed: stmt.missedKillsByChain.get(chain).missed };
+    }
+    return { ...stmt.stats.get(since24h), missed: stmt.missedKills.get().missed };
+  },
+  // 返回 true=真正新增(changes>0)，false=被幂等键拦截(重复事件)。调用方据此决定是否更新内存聚合。
+  addTrade(t) { return stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, mcap_at_trade: null, fee_raw: null, tax_raw: null, block: null, chain: null, tx_hash: null, log_index: null, ...t }).changes > 0; },
   lastTradeTs(key) { return stmt.lastTradeTs.get(key)?.ts ?? null; },
   purgeTrades(beforeMs) { return stmt.deleteOldTrades.run(beforeMs).changes; },
   tradeCount() { return stmt.countTrades.get().n; },

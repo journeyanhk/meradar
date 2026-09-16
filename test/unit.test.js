@@ -1376,3 +1376,62 @@ test('normalizeSwapV4：纯解码不取 tx.from(account=null)、带回 txHash �
   assert.equal(norm.poolType, 'v4');
   assert.equal(norm.fee, Number(sw.fee));
 });
+
+// —— 方案0-1：事件级去重（内存聚合门控）——
+import { makeEventDeduper } from '../src/dedup.js';
+
+test('makeEventDeduper：同键二次命中拦截、异 logIndex 放行、缺键不拦截', () => {
+  const isDup = makeEventDeduper();
+  // 首次投递 → 放行
+  assert.equal(isDup('arc', '0xAbc', 3), false, '首次应放行');
+  // 同一 (chain,txHash,logIndex) 二次投递 → 拦截（大小写规整）
+  assert.equal(isDup('arc', '0xabc', 3), true, '二次同键应拦截');
+  // 同 tx 不同 logIndex（一笔交易多条 Swap）→ 放行
+  assert.equal(isDup('arc', '0xabc', 4), false, '异 logIndex 应放行');
+  // 不同链同 tx/log → 放行（键含 chain）
+  assert.equal(isDup('bsc', '0xabc', 3), false, '异链应放行');
+  // 缺 txHash 或 logIndex → 不拦截（交给 DB UNIQUE 兜底）
+  assert.equal(isDup('arc', null, 3), false, '缺 txHash 不拦截');
+  assert.equal(isDup('arc', '0xabc', null), false, '缺 logIndex 不拦截');
+});
+
+test('makeEventDeduper：LRU 淘汰最旧插入项（超出 max 后旧键可再次放行）', () => {
+  const isDup = makeEventDeduper(2);
+  assert.equal(isDup('c', '0x1', 0), false);
+  assert.equal(isDup('c', '0x2', 0), false);
+  assert.equal(isDup('c', '0x3', 0), false); // 触发淘汰 0x1
+  assert.equal(isDup('c', '0x1', 0), false, '最旧键被淘汰后应重新放行');
+  assert.equal(isDup('c', '0x3', 0), true, '较新键仍在集合内应拦截');
+});
+
+// —— 方案0-1：trades 幂等键（DB 侧 INSERT OR IGNORE 持久兜底）——
+// 用独立内存库复刻 trades DDL + uq_trades_evt，避免打开真实 data/meradar.sqlite。
+import { DatabaseSync as _DBSync } from 'node:sqlite';
+
+test('trades uq_trades_evt：同事件二次入库被忽略、异 logIndex 入库、缺键各自入库', () => {
+  const mem = new _DBSync(':memory:');
+  mem.exec(`CREATE TABLE trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT, chain TEXT, ts INTEGER, side TEXT, account TEXT,
+    quote_amount REAL, token_amount REAL, price REAL,
+    tx_hash TEXT, log_index INTEGER
+  )`);
+  mem.exec('CREATE UNIQUE INDEX uq_trades_evt ON trades(chain, tx_hash, log_index)');
+  const ins = mem.prepare(
+    'INSERT OR IGNORE INTO trades (key, chain, ts, side, tx_hash, log_index) VALUES (?, ?, ?, ?, ?, ?)'
+  );
+  const count = () => mem.prepare('SELECT COUNT(*) n FROM trades').get().n;
+
+  assert.equal(ins.run('t', 'arc', 1, 'buy', '0xaa', 5).changes, 1, '首次入库');
+  assert.equal(ins.run('t', 'arc', 1, 'buy', '0xaa', 5).changes, 0, '同事件二次被忽略');
+  assert.equal(count(), 1, '同事件仅 1 行');
+
+  assert.equal(ins.run('t', 'arc', 1, 'buy', '0xaa', 6).changes, 1, '异 logIndex 入库');
+  assert.equal(count(), 2);
+
+  // SQLite 将 NULL 视为互不相等 → 历史无键行/缺键行不互相阻塞
+  assert.equal(ins.run('t', null, 1, 'buy', null, null).changes, 1, '缺键行1');
+  assert.equal(ins.run('t', null, 1, 'buy', null, null).changes, 1, '缺键行2(NULL 互异)');
+  assert.equal(count(), 4, 'NULL 键两行均入库');
+  mem.close();
+});

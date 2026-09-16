@@ -38,7 +38,7 @@ elEntry.checked = filters.entryOnly;
 elMinLiq.addEventListener('change', (e) => { filters.minLiq = +e.target.value; persistFilters(); render(); });
 elT2.addEventListener('change', (e) => { filters.t2only = e.target.checked; persistFilters(); render(); });
 elEntry.addEventListener('change', (e) => { filters.entryOnly = e.target.checked; persistFilters(); render(); });
-elChain.addEventListener('change', (e) => { filters.chain = e.target.value; persistFilters(); reload(); });
+elChain.addEventListener('change', (e) => { filters.chain = e.target.value; persistFilters(); reload(); loadStats(); });
 document.getElementById('fPause').addEventListener('change', (e) => { filters.pause = e.target.checked; });
 
 // 链标识：徽章文案 + 徽章 class（颜色见 style.css）
@@ -186,7 +186,7 @@ function render() {
     if (visible(d)) upsert(d, false);
     else removeCard(key);
   }
-  if (!feed.querySelector('.card')) empty.style.display = 'block';
+  if (!feed.querySelector('.card')) updateEmptyHint();
 }
 
 // ---------- 数据加载 ----------
@@ -199,7 +199,7 @@ async function reload() {
     const list = await r.json();
     list.reverse().forEach((d) => upsert(d, false));
   } catch { /* noop */ }
-  if (!feed.querySelector('.card')) empty.style.display = 'block';
+  if (!feed.querySelector('.card')) updateEmptyHint();
 }
 
 // 链下拉：用后端启用的链填充（/api/health.chains）
@@ -223,15 +223,35 @@ async function loadInitial() {
   await reload();
   loadStats();
 }
+let lastStats = {}; // 最近一次 /api/stats 结果，供空列表提示读 seen 数
+// 空列表提示(方案0-5)：选定单链且有 seen 候选时，提示「本链 N 个候选等待准入」，否则给通用等待文案。
+function updateEmptyHint() {
+  if (feed.querySelector('.card')) { empty.style.display = 'none'; return; }
+  const seen = +lastStats.seen || 0;
+  if (filters.chain && filters.chain !== 'all') {
+    const name = CHAIN_LABEL[filters.chain] || filters.chain;
+    empty.textContent = seen > 0
+      ? `本链(${name}) ${seen} 个候选等待准入（买家数未达门槛，尚未进入跟踪列表）`
+      : `本链(${name})暂无新币信号…（确保后端已连上该链 RPC）`;
+  } else {
+    empty.textContent = seen > 0
+      ? `${seen} 个候选等待准入（买家数未达门槛，尚未进入跟踪列表）`
+      : '等待新币信号…（确保后端已连上 RPC）';
+  }
+  empty.style.display = 'block';
+}
 async function loadStats() {
   try {
-    const s = await fetch('/api/stats').then((r) => r.json());
+    const q = filters.chain && filters.chain !== 'all' ? `?chain=${encodeURIComponent(filters.chain)}` : '';
+    const s = await fetch('/api/stats' + q).then((r) => r.json());
+    lastStats = s;
     document.getElementById('s-total').textContent = s.total ?? 0;
     document.getElementById('s-24h').textContent = s.last24h ?? 0;
     document.getElementById('s-t1').textContent = s.t1 ?? 0;
     document.getElementById('s-t2').textContent = s.t2 ?? 0;
     document.getElementById('s-t3').textContent = s.t3 ?? 0;
     document.getElementById('s-missed').textContent = s.missed ?? 0;
+    updateEmptyHint();
   } catch { /* noop */ }
 }
 

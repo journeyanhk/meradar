@@ -13,10 +13,17 @@ import { learnTemplate, recordPromotedTemplate, learnHook } from './template.js'
 import * as momentum from './momentum.js';
 import { recordPoolState } from './poolstate.js';
 import { recordSeen, recordPromoted, recordTradeWrite, setSwapPools } from './health.js';
+import { makeEventDeduper } from './dedup.js';
 import { child } from './logger.js';
 import { formatUnits } from 'viem';
 
 const log = child('engine');
+
+// 事件级去重(方案0-1)：防 watchWithReconnect 退避重建 / viem WS 重连重放导致同一 log 二次投递
+// → momentum(放量/净流入/买卖比/买家时间序) 双计。onTrade/onSwap 入口统一拦截(覆盖 seen+active)；
+// trades 表另有 uq_trades_evt(INSERT OR IGNORE) 持久兜底。回填只喂 momentum、不入口本门(其 ts 为块高估算，
+// 与实时边界重叠有限，且不写 trades，故不影响 trades 幂等)。
+const isDupEvent = makeEventDeduper();
 
 // 代币供应量(human)，用于把成交单价换算成成交时市值
 function supplyHumanOf(cand) {
@@ -45,7 +52,7 @@ function recordCurveTrade(t, cand) {
   const ts = t.ts || Date.now();
   const price = tokenHuman > 0 ? usd / tokenHuman : 0;
   const supply = supplyHumanOf(cand);
-  store.addTrade({ key: cand.key, ts, side, account: t.account, quote_amount: usd, token_amount: tokenHuman, price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null, fee_raw: t.fee != null ? t.fee.toString() : null, tax_raw: t.tax != null ? t.tax.toString() : null, block: t.block ?? null });
+  store.addTrade({ key: cand.key, chain: t.chain, ts, side, account: t.account, quote_amount: usd, token_amount: tokenHuman, price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null, fee_raw: t.fee != null ? t.fee.toString() : null, tax_raw: t.tax != null ? t.tax.toString() : null, block: t.block ?? null, tx_hash: t.tx ?? null, log_index: t.logIndex ?? null });
   if (side === 'buy' && t.account) store.addBuyer(cand.key, t.account, ts);
   recordTradeWrite();
 }
@@ -87,6 +94,7 @@ async function onCreate(c) {
 
 // TokenPurchase/TokenSale：喂动量状态机；买家达阈值才升级为 active。
 async function onTrade(t) {
+  if (isDupEvent(t.chain, t.tx, t.logIndex)) return; // 幂等：重复投递的同一成交事件直接丢(momentum/trades 均不重复计)
   momentum.onTrade({
     token: t.address, account: t.account, price: t.price,
     cost: t.cost, funds: t.funds, offers: t.offers, isBuy: t.isBuy, ts: t.ts,
@@ -235,6 +243,7 @@ async function admitV4SeenBuy(sw, key, cand, isBuy) {
 }
 
 async function onSwap(sw) {
+  if (isDupEvent(sw.chain, sw.txHash, sw.logIndex)) return; // 幂等：重复投递的同一 Swap 直接丢(见方案0-1)
   const key = `${sw.chain}:${sw.address.toLowerCase()}`;
   const cand = store.get(key);
   if (!cand) return;
@@ -267,9 +276,10 @@ async function onSwap(sw) {
   const price = sw.tokenHuman > 0 ? usd / sw.tokenHuman : 0;
   const supply = supplyHumanOf(cand);
   store.addTrade({
-    key, ts: sw.ts, side: sw.side, account,
+    key, chain: sw.chain, ts: sw.ts, side: sw.side, account,
     quote_amount: usd, token_amount: sw.tokenHuman || 0,
     price, mcap_at_trade: price > 0 && supply > 0 ? price * supply : null, block: sw.block ?? null,
+    tx_hash: sw.txHash ?? null, log_index: sw.logIndex ?? null,
   });
   if (isBuy && account) store.addBuyer(key, account, sw.ts);
   if (discover) store.touchLastTrade(key, sw.ts); // active 池同刷，有量的池排序靠前不被挤出
@@ -576,6 +586,17 @@ function rebuildV4Swaps(chain) {
   v4SwapUnwatch.set(chain, pools.length ? resubscribeV4Swaps(chain, pm, pools, (sw) => onSwap(sw).catch((e) => log.debug({ err: e.message }, 'onSwap(v4)'))) : null);
 }
 
+// 回填零结果告警(方案0-6)：按链/来源参数化。不同链/发射台体量差异极大，用 minExpectedPer2h 表达
+// 「正常 2 小时窗口至少应有这么多」的保守下限——count==0 时几乎必是 RPC 限流/端点失联/订阅源错配(不吞、单独 warn)；
+// 其余走 info。minExpectedPer2h 写进日志载荷供人工判读与后续「count<下限」分级告警接入。
+function reportBackfill({ chain, kind, count, hours, minExpectedPer2h, failedChunks = 0 }) {
+  if (count === 0) {
+    log.warn({ chain, kind, hours, minExpectedPer2h, failedChunks }, `回填 count==0：正常 2h 窗口应≥${minExpectedPer2h} 个「${kind}」，RPC 可能限流/端点异常/来源错配`);
+  } else {
+    log.info({ chain, kind, count, hours, minExpectedPer2h, failedChunks }, '启动回填完成');
+  }
+}
+
 // 启动回填：按链上启用的发射台类型分派（Four.meme 事件流 / Pons 曲线）。
 export async function backfillRecentCreates(chain, hours = 2) {
   const cfg = chainConfig(chain);
@@ -637,9 +658,8 @@ async function backfillArcLaunchpad(chain, lp, hours = 2) {
     from = to + 1n;
     await sleep(200);
   }
-  // Arc 发射台每小时数百次发射：2 小时窗口 count==0 高度可疑(RPC 限流/端点失联)，与 Initialize 回填一致单独告警。
-  if (count === 0) log.warn({ chain, hours, failedChunks }, 'Arc 发射台回填 count==0：Arc 发射不可能为 0，RPC 可能限流/端点异常');
-  else log.info({ chain, count, hours, failedChunks }, 'Arc 发射台启动回填完成');
+  // Arc 发射台每小时数百次发射(方案0-6)：2h 窗口 count==0 高度可疑，按链参数化告警。
+  reportBackfill({ chain, kind: 'arc-launchpad 发射', count, hours, minExpectedPer2h: 100, failedChunks });
   return count;
 }
 
@@ -682,9 +702,8 @@ async function backfillV4Initialize(chain, hours = 2) {
     from = to + 1n;
     await sleep(200);
   }
-  // Arc ~2000 池/时：2 小时窗口 count==0 在链正常时不可能 → 几乎必是 RPC 限流/端点失联，单独告警(不吞)。
-  if (count === 0) log.warn({ chain, hours, failedChunks }, 'Arc Initialize 回填 count==0：Arc 建池不可能为 0，RPC 可能限流/端点异常');
-  else log.info({ chain, count, hours, failedChunks }, 'Arc 启动回填 Initialize 完成');
+  // Arc ~2000 池/时(方案0-6)：2h 窗口 count==0 在链正常时不可能，按链参数化告警。
+  reportBackfill({ chain, kind: 'v4 Initialize 建池', count, hours, minExpectedPer2h: 500, failedChunks });
   return count;
 }
 
@@ -746,7 +765,8 @@ async function backfillFourMeme(chain, hours = 2) {
     from = to + 1n;
     await sleep(250); // 分段间隔，降低被限流概率
   }
-  log.info({ chain, count, hours }, '启动回填 TokenCreate 完成');
+  // BSC Four.meme TokenCreate(方案0-6)：主网每 2h 稳定有数十个新币，count==0 属异常，按链参数化告警。
+  reportBackfill({ chain, kind: 'Four.meme TokenCreate', count, hours, minExpectedPer2h: 10 });
   return count;
 }
 
@@ -850,7 +870,8 @@ async function backfillPonsLaunches(chain, hours = 2) {
     from = to + 1n;
     await sleep(400);
   }
-  log.info({ chain, launches, hours }, 'Pons 启动回填完成');
+  // Robinhood Pons TokenLaunched(方案0-6)：新链体量小，保守下限 5/2h；launches==0 提示订阅源/RPC 异常。
+  reportBackfill({ chain, kind: 'Pons TokenLaunched', count: launches, hours, minExpectedPer2h: 5 });
   return launches;
 }
 

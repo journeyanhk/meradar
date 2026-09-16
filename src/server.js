@@ -146,9 +146,10 @@ export async function startServer() {
     return { ...decorate(c), snapshots: store.snapshots(c.key) };
   });
 
-  app.get('/api/stats', async () => {
+  app.get('/api/stats', async (req) => {
     const since = Date.now() - 24 * 3600 * 1000;
-    return store.stats(since);
+    const chain = req.query?.chain || null; // 方案0-5：分链统计(空=全量)，前端据 seen 数显示「本链 N 个候选等待准入」
+    return store.stats(since, chain);
   });
 
   // SSE 实时推送

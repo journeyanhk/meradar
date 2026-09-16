@@ -8,6 +8,18 @@ let tradesWritten = 0;
 const tradeWriteTimes = [];
 const txFetchTimes = []; // v4 getTransaction(取 tx.from) 时刻，供 getTransactionPerMin 观测(Arc 全量订阅)
 const nativeUsdState = {}; // chain -> { price, live }  (live=false 表示 BSC 池不可用、退回 fallback 常量，需可见)
+// 每条订阅的健康画像(方案0-3/0-4)：键 `chain:label` → { chain, label, lastEventAt, errors, rebuilds }。
+// 看门狗按 lastEventAt 判定静默、errors/rebuilds 反映抖动，/api/health 按链聚合暴露。
+const subscriptions = new Map();
+function subEntry(chain, label) {
+  const k = `${chain}:${label}`;
+  let e = subscriptions.get(k);
+  if (!e) { e = { chain, label, lastEventAt: 0, errors: 0, rebuilds: 0 }; subscriptions.set(k, e); }
+  return e;
+}
+export function recordSubEvent(chain, label) { subEntry(chain, label).lastEventAt = Date.now(); }
+export function recordSubError(chain, label) { subEntry(chain, label).errors++; }
+export function recordSubRebuild(chain, label) { subEntry(chain, label).rebuilds++; }
 
 export function recordRpcError() {
   rpcErrTimes.push(Date.now());
@@ -39,5 +51,15 @@ export function healthSnapshot() {
   const getTransactionPerMin = txFetchTimes.filter((t) => now - t < 60_000).length;
   const ws = {};
   for (const [c, ts] of wsLastLog) ws[c] = { lastLogAgoSec: Math.round((now - ts) / 1000) };
+  // 按链聚合每条订阅画像(方案0-4)：三链结构一致，缺 wsLastLog 的链(尚无日志)也补出 ws[chain]。
+  for (const e of subscriptions.values()) {
+    const bucket = (ws[e.chain] ||= {});
+    (bucket.subscriptions ||= {})[e.label] = {
+      lastEventAt: e.lastEventAt || null,
+      lastEventAgoSec: e.lastEventAt ? Math.round((now - e.lastEventAt) / 1000) : null,
+      errors: e.errors,
+      rebuilds: e.rebuilds,
+    };
+  }
   return { rpcErrors5m, ws, seenTotal, promotedTotal, swapPools: swapPoolsCount, tradesWritten, tradesPerMin, getTransactionPerMin, nativeUsd: nativeUsdState };
 }
