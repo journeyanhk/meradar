@@ -325,6 +325,9 @@ const stmt = {
   // pool-first 币登记即建池、需订阅 Swap 计买家才能升 active；按毕业时刻倒序取近 500，防订阅量失控。
   swapPoolsByChain: db.prepare(`SELECT key, chain, address, decimals, pool, pool_type, quote_symbol FROM candidates WHERE chain=? AND status='active' AND pool IS NOT NULL`),
   swapPoolsByChainInclSeen: db.prepare(`SELECT key, chain, address, decimals, pool, pool_type, quote_symbol FROM candidates WHERE chain=? AND status IN ('active','seen') AND pool IS NOT NULL ORDER BY COALESCE(last_trade_at, graduated_at, discovered_at) DESC LIMIT 500`),
+  // 全量订阅模式(Arc)：单一 PoolManager 监听，meta 仅是 poolId→币 映射，不再是订阅分片，
+  // 故无需 LIMIT——但按 seenCleanupHours 时间窗剔除陈旧池，避免 Map 无界增长。仅取 v4。
+  swapPoolsByChainAll: db.prepare(`SELECT key, chain, address, decimals, pool, pool_type, quote_symbol FROM candidates WHERE chain=? AND status IN ('active','seen') AND pool IS NOT NULL AND pool_type='v4' AND COALESCE(last_trade_at, graduated_at, discovered_at) >= ?`),
   addPoolCreator: db.prepare(`INSERT INTO pool_creators (chain, ts, creator, contract, pool, tx) VALUES (@chain, @ts, @creator, @contract, @pool, @tx)`),
   touchLastTrade: db.prepare(`UPDATE candidates SET last_trade_at=? WHERE key=?`),
   poolCreatorsByCreator: db.prepare(`SELECT creator AS id, COUNT(*) AS n FROM pool_creators WHERE chain=? AND ts>=? AND creator IS NOT NULL GROUP BY creator ORDER BY n DESC LIMIT 10`),
@@ -499,6 +502,8 @@ export const store = {
   swapPoolsFor(chain, inclSeen = false) {
     return inclSeen ? stmt.swapPoolsByChainInclSeen.all(chain) : stmt.swapPoolsByChain.all(chain);
   },
+  // 全量订阅模式：取时间窗内所有 v4 池(无 LIMIT)，sinceTs = now - seenCleanupHours。
+  swapPoolsForFull(chain, sinceTs) { return stmt.swapPoolsByChainAll.all(chain, sinceTs); },
   addPoolCreator({ chain, ts = Date.now(), creator = null, contract = null, pool = null, tx = null }) {
     stmt.addPoolCreator.run({ chain, ts, creator, contract, pool, tx });
   },

@@ -4,7 +4,7 @@ import { scoreCandidate } from './score.js';
 import { store } from './db.js';
 import { config, chainConfig, admissionFor } from './config.js';
 import { httpClient, logsClient, getSecPerBlock, estimateTsFromBlock } from './chain.js';
-import { fourMemeEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents } from './abi.js';
+import { fourMemeEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents, v4InitializeEvent } from './abi.js';
 import { bus, Events } from './bus.js';
 import { startTracker } from './track.js';
 import { discoverPool } from './pool.js';
@@ -444,7 +444,14 @@ const v4Meta = new Map();        // chain -> Map<poolIdLower, meta>（full 模�
 function buildV4Pools(chain) {
   const cfg = chainConfig(chain);
   const pools = [];
-  for (const r of store.swapPoolsFor(chain, !!cfg.discoverFromPools).filter((r) => r.pool && r.pool_type === 'v4')) {
+  // full 模式(Arc)：meta 只是 poolId→币 映射(非订阅分片)，故不走 LIMIT 500 的 inclSeen 查询——
+  // Arc ~2000 池/时，LIMIT 500 会让 15 分钟前的 seen 池掉出 meta、其 Swap 被丢弃、永远升不到 3 买家。
+  // 改取 seenCleanupHours 时间窗内的全部 v4 池(无 LIMIT)，与 index.js 的清理窗口一致，避免 Map 无界。
+  const rows = cfg.v4SwapSubscription === 'full'
+    ? store.swapPoolsForFull(chain, Date.now() - (cfg.seenCleanupHours ?? 24) * 3600_000)
+    : store.swapPoolsFor(chain, !!cfg.discoverFromPools).filter((r) => r.pool && r.pool_type === 'v4');
+  for (const r of rows) {
+    if (!r.pool || r.pool_type !== 'v4') continue;
     const vp = store.v4PoolById(chain, r.pool) || store.v4PoolByToken(chain, r.address);
     if (!vp) continue;
     const q = resolveQuote(cfg, r.quote_symbol) || {};
@@ -483,6 +490,53 @@ export async function backfillRecentCreates(chain, hours = 2) {
   if (cfg.launchpads?.some((l) => l.type === 'fourmeme-events' && l.address && !/^0x0+$/.test(l.address))) {
     count += await backfillFourMeme(chain, hours).catch((e) => { log.warn({ chain, err: e.message }, 'Four.meme 回填失败(忽略)'); return 0; });
   }
+  // pool-first 链(Arc)：无发射台事件流，池的 Initialize 才是主来源——回填最近 ~hours 小时的
+  // PoolManager.Initialize，让启动前建好的 v4 池登记为 seen·已毕业并接上 v4 定价/订阅。
+  if (cfg.discoverFromPools && cfg.poolManagerV4 && !/^0x0+$/.test(cfg.poolManagerV4)) {
+    count += await backfillV4Initialize(chain, hours).catch((e) => { log.warn({ chain, err: e.message }, 'Arc Initialize 回填失败(忽略)'); return 0; });
+  }
+  return count;
+}
+
+// pool-first(Arc) 启动回填：扫描最近 ~hours 小时 PoolManager.Initialize，逐条走 onV4Initialize
+// 登记新池(seen·已毕业)。分段 1500 块(Arc ~0.5s/块，getLogs 范围保守)，官方端点，退避重试。
+async function backfillV4Initialize(chain, hours = 2) {
+  const cfg = chainConfig(chain);
+  const pm = cfg.poolManagerV4;
+  const client = logsClient(chain); // getLogs 回填走官方端点
+  let latest;
+  try { latest = await client.getBlockNumber(); } catch (e) { log.warn({ chain, err: e.message }, 'Arc 回填取块高失败'); return 0; }
+  const blocksPerHour = Math.round(3600 / getSecPerBlock(chain));
+  const span = BigInt(blocksPerHour * hours);
+  const chunk = 1500n; // Arc ~0.5s/块，段短防 getLogs 超范围
+  let from = latest > span ? latest - span : 0n;
+  let count = 0;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  while (from <= latest) {
+    const to = from + chunk - 1n > latest ? latest : from + chunk - 1n;
+    let logs = null;
+    for (let attempt = 0; attempt < 3 && logs === null; attempt++) {
+      try {
+        logs = await client.getLogs({ address: pm, event: v4InitializeEvent, fromBlock: from, toBlock: to });
+      } catch (e) {
+        if (attempt === 2) log.debug({ chain, from: from.toString(), err: e.message }, 'Arc Initialize 回填分段失败(跳过，靠实时订阅兜底)');
+        else await sleep(600 * (attempt + 1));
+      }
+    }
+    for (const l of logs || []) {
+      const a = l.args || {};
+      if (!a.id) continue;
+      await onV4Initialize({
+        chain, poolId: a.id, currency0: a.currency0, currency1: a.currency1,
+        fee: a.fee, tickSpacing: a.tickSpacing, hooks: a.hooks,
+        block: Number(l.blockNumber || 0), tx: l.transactionHash,
+      }).catch(() => {});
+      count++;
+    }
+    from = to + 1n;
+    await sleep(200);
+  }
+  log.info({ chain, count, hours }, 'Arc 启动回填 Initialize 完成');
   return count;
 }
 

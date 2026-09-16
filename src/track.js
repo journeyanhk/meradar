@@ -179,8 +179,18 @@ export async function pollCandidate(chain, cand) {
       '价格合理性钳位命中：疑似报价币单位错误，已归零(见 $MUMO 教训)');
   }
   const depthKind = px.source === 'curve' ? 'curve' : (cand.pool ? 'amm' : 'curve');
-  // v4 池费率(百万分之→%)：取最近一笔 Swap 记录的 fee(静态费率池也据此)，供费率硬拒(90.1% 反狙击池)。
-  const poolFee = cand.pool_type === 'v4' ? getPoolState(chain, cand.pool, Infinity)?.fee : null;
+  // v4 池费率(百万分之→%)：优先取最近一笔 Swap 记录的 fee；无成交时退回 v4_pools 的静态费率(Initialize 落库)，
+  // 使「建好即 90% 反狙击、尚无成交」的池也能被费率硬拒。0x800000=动态费率标志位 → 视作未知(null)。
+  const DYNAMIC_FEE_FLAG = 0x800000;
+  let poolFee = null;
+  if (cand.pool_type === 'v4') {
+    const liveFee = getPoolState(chain, cand.pool, Infinity)?.fee;
+    if (liveFee != null) poolFee = liveFee;
+    else {
+      const staticFee = (store.v4PoolById(chain, cand.pool) || store.v4PoolByToken(chain, cand.address))?.fee;
+      if (staticFee != null && staticFee !== DYNAMIC_FEE_FLAG) poolFee = staticFee;
+    }
+  }
   const poolFeePct = poolFee != null ? (poolFee / 1e6) * 100 : null;
   const offersPct = curve?.offersPct ?? prev?.offers_pct ?? 0;
   // 曲线毕业进度 = funds / maxRaising（同为报价币单位，比值与小数位无关），比「剩余%」直观。

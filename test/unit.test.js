@@ -1292,3 +1292,14 @@ test('可试仓v1.1：正常费率(1%)不触发费率拒 → 放行', () => {
   const e = evaluateEntry(m, EF, goodCounts);
   assert.equal(e.ok, true);
 });
+
+import { recordTxFetch, healthSnapshot } from '../src/health.js';
+
+test('健康快照暴露 getTransactionPerMin：v4 取 tx.from 的 RPC 压力可观测', () => {
+  const before = healthSnapshot().getTransactionPerMin;
+  assert.equal(typeof before, 'number');
+  recordTxFetch();
+  recordTxFetch();
+  const after = healthSnapshot().getTransactionPerMin;
+  assert.equal(after, before + 2);
+});

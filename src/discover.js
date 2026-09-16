@@ -2,7 +2,7 @@ import { parseAbiItem, formatUnits } from 'viem';
 import { wsClient, httpClient } from './chain.js';
 import { chainConfig } from './config.js';
 import { fourMemeEvents, swapEvents, ponsFactoryEvents, ponsCurveEvents, ponsHookEvents, v4SwapEvent, v4InitializeEvent } from './abi.js';
-import { recordWsLog, recordRpcError } from './health.js';
+import { recordWsLog, recordRpcError, recordTxFetch } from './health.js';
 import { child } from './logger.js';
 
 const log = child('discover');
@@ -411,18 +411,32 @@ export function classifyV4Swap({ amount0, amount1, memeIsCurrency0 }) {
  * v4 Swap 归一化。买家/卖家=tx.from —— Swap.sender 是 Router、HookFeeCollected.payer 是 memecoin 合约，
  * 均非真实交易者(已链上核验)；故买单与卖单都额外拉一次 getTransaction 取 from，
  * 取不到/零地址则不记账户(double-zero 兜底)。卖单也取 from，是为让毕业后 flipper(快进快出)可归因。
+ * 同一 txHash 常含多条 Swap(路由多跳/同池连买) → LRU 缓存 txHash→from，省重复 getTransaction。
  */
+const TX_FROM_CACHE = new Map(); // txHashLower -> from(lower)（LRU：超上限删最旧）
+const TX_FROM_CACHE_MAX = 20000;
+function cacheTxFrom(hash, from) {
+  TX_FROM_CACHE.set(hash, from);
+  if (TX_FROM_CACHE.size > TX_FROM_CACHE_MAX) TX_FROM_CACHE.delete(TX_FROM_CACHE.keys().next().value);
+}
 async function normalizeSwapV4(l, p, chain) {
   const a = l.args || {};
   const c = classifyV4Swap({ amount0: a.amount0, amount1: a.amount1, memeIsCurrency0: p.memeIsCurrency0 });
   if (!c || c.quoteRaw <= 0n) return null;
   let account = null;
   if (l.transactionHash) {
-    try {
-      const tx = await httpClient(chain).getTransaction({ hash: l.transactionHash });
-      const from = (tx?.from || '').toLowerCase();
-      if (from && !/^0x0+$/.test(from)) account = from;
-    } catch { /* 拿不到 from → 不计账户 */ }
+    const hash = l.transactionHash.toLowerCase();
+    if (TX_FROM_CACHE.has(hash)) {
+      account = TX_FROM_CACHE.get(hash); // 命中缓存(可能是 null，代表已确认无有效 from)
+    } else {
+      try {
+        recordTxFetch();
+        const tx = await httpClient(chain).getTransaction({ hash: l.transactionHash });
+        const from = (tx?.from || '').toLowerCase();
+        account = (from && !/^0x0+$/.test(from)) ? from : null;
+        cacheTxFrom(hash, account);
+      } catch { /* 拿不到 from → 不计账户，且不缓存(留待下次重试) */ }
+    }
   }
   const quoteHuman = Number(formatUnits(c.quoteRaw, p.quoteDecimals || 18));
   const tokenHuman = Number(formatUnits(c.tokenRaw, p.tokenDecimals || 18));
