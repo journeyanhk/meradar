@@ -254,8 +254,9 @@ async function readV4PoolState(chain, poolManager, poolId) {
   }
 }
 
-// v4 池是否「全区间」(流动性铺满整条价格曲线)。全区间池的活跃流动性=总流动性，liquidity==0 才真撤池；
-// 集中池(非全区间)liquidity==0 只是当前 tick 无头寸。判据：hook 命中已配置发射台(Pons) 或 tickSpacing≥200。
+// v4 池是否「全区间」。⚠️ 已不再用于撤池判定 —— 「tickSpacing≥200 = 全区间」这条从 Pons 带来的假设在 Arc
+// 单边发射池上必然误判(见 readPoolMetrics)，撤池现改用「曾有流动性(max_liquidity_seen)」证据。此函数保留供
+// 后续深度公式按真实区间(ModifyLiquidity 的 tickLower/tickUpper)判定的重构复用；纯函数、单测冻结。
 export function isFullRangePool(cfg, hooks, tickSpacing) {
   const hookLc = (hooks || '').toLowerCase();
   if (hookLc && !/^0x0+$/.test(hookLc)) {
@@ -289,7 +290,7 @@ export function computeV4Metrics({ sqrtPriceX96, liquidity, memeIsCurrency0, mem
 
 // 读池子 -> 流动性/价格/市值。支持 V2(getReserves)、V3(slot0)、v4(extsload)。
 // v4：pool 传 poolId(bytes32)、poolType='v4'；池地址=cfg.poolManagerV4。currency 排序由地址推导(原生 0x0 恒为 currency0)。
-export async function readPoolMetrics(chain, { pool, poolType, token, quote, decimals, totalSupply, tickSpacing = null, hooks = null }) {
+export async function readPoolMetrics(chain, { pool, poolType, token, quote, decimals, totalSupply, tickSpacing = null, hooks = null, maxLiquiditySeen = 0n }) {
   if (!pool || !quote) return null;
   const cfg = chainConfig(chain);
   const q = resolveQuote(cfg, quote);
@@ -312,14 +313,18 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
         sqrtPriceX96: st.sqrtPriceX96, liquidity: st.liquidity, memeIsCurrency0,
         memeDec, quoteDec: q.decimals, quoteUsd, supplyHuman: supply,
       });
-      // v4 的 liquidity 是「当前 tick 活跃流动性」：全区间池(Pons hook / tickSpacing≥200)为 0 才是真撤池；
-      // 集中池价格走出所有头寸区间时也会是 0 但资金仍在 → 标 noActiveLiquidity、保旧价，不误判为 rug。
+      // v4 的 liquidity 是「当前 tick 活跃流动性」。撤池判定改用「曾有流动性」证据(从有到无 = 真 rug)，
+      // 不再靠「tickSpacing≥200 = 全区间」这条从 Pons 带来的假设 —— 该假设在 Arc 单边发射池上必然误判：
+      // 代币全挂在当前价之上、USDC 侧为 0，第一笔买入前当前 tick liquidity=0 是设计如此，不是被抽干。
+      //   drained          = 现在为 0 且曾有过流动性(max_liquidity_seen>0) → 真撤池
+      //   noActiveLiquidity = 现在为 0 且从未激活(单边挂单/未开盘) → 用初始 sqrtPrice 定价、深度记 0，不归零
       const empty = st.liquidity === 0n;
-      const fullRange = isFullRangePool(cfg, hooks, tickSpacing);
+      const hadLiquidity = (maxLiquiditySeen ?? 0n) > 0n || st.liquidity > 0n;
       return {
         ...m, quoteSymbol: q.sym, priced,
-        drained: empty && fullRange,
-        noActiveLiquidity: empty && !fullRange,
+        drained: empty && hadLiquidity,
+        noActiveLiquidity: empty && !hadLiquidity,
+        observedLiquidity: st.liquidity,
         updatedAt: cached ? st.ts : Date.now(), source: cached ? 'event' : 'rpc',
       };
     }

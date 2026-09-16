@@ -153,7 +153,12 @@ export async function pollCandidate(chain, cand) {
       pool: cand.pool, poolType: cand.pool_type, token, quote: cand.quote_symbol,
       decimals: cand.decimals, totalSupply: cand.total_supply ? BigInt(cand.total_supply) : null,
       tickSpacing: v4meta?.tick_spacing ?? null, hooks: v4meta?.hooks ?? null,
+      maxLiquiditySeen: v4meta?.max_liquidity_seen ? BigInt(v4meta.max_liquidity_seen) : 0n,
     });
+    // 记录历史最大流动性(撤池判定的「曾有」证据)：本轮读到更大值就写库，重启不丢。
+    if (cand.pool_type === 'v4' && poolM?.observedLiquidity != null) {
+      store.bumpV4MaxLiquidity(chain, cand.pool, poolM.observedLiquidity);
+    }
   }
 
   const prev = store.get(cand.key);

@@ -81,8 +81,18 @@ function resolvePriceInner({ now = Date.now(), hasPool, poolType, poolM, curve, 
     if (poolM && poolM.drained) {
       return { priceUsd: 0, depthUsd: 0, marketCapUsd: 0, source, updatedAt: now, stale: false, state: 'withdrawn' };
     }
-    // 集中池当前 tick 无活跃流动性（≠ 撤池，资金在别的价位区间）→ 保旧价，勿归零。
+    // 未激活/单边池：当前 tick 无活跃流动性但初始价(sqrtPrice)有效 → 用它定「起点市值」，深度归 0(单边/未开盘)。
+    // ≠ 撤池(资金没被抽，只是还没人买进区间)。有初始价即 state='ok'、市值=价×供应；无价才保旧。
+    // 这解决 Arc 单边发射池全 $0：卡片显示起点市值，深度 $0 标「未开盘」，真有人买入后随 Swap 更新。
     if (poolM && poolM.noActiveLiquidity) {
+      if (poolM.priced && poolM.priceUsd > 0) {
+        const at = poolM.updatedAt || now;
+        const state = stateFromAge(now, at);
+        return {
+          priceUsd: poolM.priceUsd, depthUsd: 0, marketCapUsd: poolM.marketCapUsd || 0,
+          source, updatedAt: at, stale: state !== 'ok', state,
+        };
+      }
       return keepOld();
     }
     // 读成功且有价 → 主源。updatedAt 取事件/读取时刻(事件驱动为成交时间)，据此判新鲜度。

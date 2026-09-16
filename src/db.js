@@ -229,6 +229,12 @@ ensureColumns('candidates', [
   ['hook', 'hook TEXT'],
   ['fee_schedule', 'fee_schedule TEXT'],
 ]);
+// v4_pools 补列：max_liquidity_seen=历次读到的最大 activeLiquidity(bigint 存 TEXT)。
+// 撤池判定改为「曾有流动性(从有到无)」而非「tickSpacing≥200 且当前 tick 为 0」——后者在 Arc 单边发射池上必然误判
+// (代币全挂在当前价之上、USDC 侧为 0，第一笔买入前当前 tick 无流动性是设计如此，不是 rug)。重启不丢「曾有」证据。
+ensureColumns('v4_pools', [
+  ['max_liquidity_seen', 'max_liquidity_seen TEXT'],
+]);
 // trades 已有 price(成交时单价 USD)=price_at_trade，无需重复列；只补 mcap_at_trade：
 // 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
 ensureColumns('trades', [
@@ -363,6 +369,7 @@ const stmt = {
   `),
   v4PoolByToken: db.prepare(`SELECT * FROM v4_pools WHERE chain=? AND token=? ORDER BY created_at DESC LIMIT 1`),
   v4PoolById: db.prepare(`SELECT * FROM v4_pools WHERE chain=? AND pool_id=?`),
+  setV4MaxLiquidity: db.prepare(`UPDATE v4_pools SET max_liquidity_seen=? WHERE chain=? AND pool_id=?`),
   allV4Pools: db.prepare(`SELECT * FROM v4_pools`),
   v4PoolsByChain: db.prepare(`SELECT * FROM v4_pools WHERE chain=?`),
   // M2c 买家分级
@@ -569,5 +576,15 @@ export const store = {
   },
   v4PoolByToken(chain, token) { return stmt.v4PoolByToken.get(chain, String(token).toLowerCase()); },
   v4PoolById(chain, poolId) { return stmt.v4PoolById.get(chain, String(poolId).toLowerCase()); },
+  // 记录该池历史最大 activeLiquidity(单调递增)。撤池判定的「曾有流动性」证据来源，重启不丢。
+  // liq 为 bigint；仅在更大时写库(避免每轮无谓 UPDATE)。
+  bumpV4MaxLiquidity(chain, poolId, liq) {
+    if (liq == null || liq <= 0n) return;
+    const id = String(poolId).toLowerCase();
+    const row = stmt.v4PoolById.get(chain, id);
+    if (!row) return;
+    const cur = row.max_liquidity_seen ? BigInt(row.max_liquidity_seen) : 0n;
+    if (liq > cur) stmt.setV4MaxLiquidity.run(liq.toString(), chain, id);
+  },
   v4Pools(chain) { return chain ? stmt.v4PoolsByChain.all(chain) : stmt.allV4Pools.all(); },
 };

@@ -963,15 +963,26 @@ test('M3-1b resolvePrice：曲线价但最后成交 >24h → unknown', () => {
   assert.equal(px.state, 'unknown');
 });
 
-test('M3-1b resolvePrice：v4 集中池当前 tick 无流动性(noActiveLiquidity) → 保旧价，不 withdrawn', () => {
+test('M3-1b resolvePrice：单边/未激活池(noActiveLiquidity)有初始价 → 用 sqrtPrice 定起点市值、深度归 0、state=ok', () => {
   const now = 10_000_000;
-  const prev = { price_usd: 0.02, market_cap_usd: 300000, depth_usd: 8000, price_source: 'amm-v4', price_updated_at: now - 30_000 };
-  const poolM = { priceUsd: 0.02, liquidityUsd: 0, marketCapUsd: 300000, priced: true, drained: false, noActiveLiquidity: true };
+  const prev = { price_usd: 0, market_cap_usd: 0, depth_usd: 0, price_source: null, price_updated_at: 0 };
+  // Arc 单边发射池：liquidity=0(还没人买) 但 sqrtPrice 有效 → poolM 带 priceUsd/marketCapUsd(由 computeV4Metrics 从 sqrtPrice 算)、liquidityUsd=0。
+  const poolM = { priceUsd: 0.001, liquidityUsd: 0, marketCapUsd: 1_000_000, priced: true, drained: false, noActiveLiquidity: true, updatedAt: now - 5_000 };
   const px = resolvePrice({ now, hasPool: true, poolType: 'v4', poolM, curve: null, prev });
-  assert.equal(px.priceUsd, 0.02, '保旧价');
-  assert.equal(px.depthUsd, 8000);
+  assert.equal(px.priceUsd, 0.001, '用初始价定价(不再全 $0)');
+  assert.equal(px.marketCapUsd, 1_000_000, '起点市值 = 初始价 × 供应');
+  assert.equal(px.depthUsd, 0, '单边挂单 → 深度归 0');
   assert.notEqual(px.state, 'withdrawn', '不误判为撤池');
   assert.equal(px.state, 'ok');
+});
+
+test('M3-1b resolvePrice：单边/未激活池但无可信价(priceUsd=0) → 保旧价，不 withdrawn', () => {
+  const now = 10_000_000;
+  const prev = { price_usd: 0.02, market_cap_usd: 300000, depth_usd: 8000, price_source: 'amm-v4', price_updated_at: now - 30_000 };
+  const poolM = { priceUsd: 0, liquidityUsd: 0, marketCapUsd: 0, priced: false, drained: false, noActiveLiquidity: true };
+  const px = resolvePrice({ now, hasPool: true, poolType: 'v4', poolM, curve: null, prev });
+  assert.equal(px.priceUsd, 0.02, '无价则保旧价');
+  assert.notEqual(px.state, 'withdrawn');
 });
 
 // —— $MUMO 教训：合理性钳位（报价币无美元价却被填单位错误常量/残留值）——

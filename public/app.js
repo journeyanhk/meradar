@@ -120,7 +120,7 @@ function cardHtml(d) {
   else if (d.softFlags && d.softFlags.unpriced) badges.push(`<span class="badge unpriced">报价币${d.quoteSymbol ? ' ' + esc(d.quoteSymbol) : ''}·无美元价</span>`);
   else if (d.priceUnknown) badges.push('<span class="badge unknown">价格未知</span>');
   else if (d.priceStale) badges.push(`<span class="badge stale">更新于${ago(d.priceUpdatedAt)}前</span>`);
-  if (d.softFlags && d.softFlags.noActiveLiquidity) badges.push('<span class="badge noliq">当前价位无流动性</span>');
+  if (d.softFlags && d.softFlags.noActiveLiquidity) badges.push('<span class="badge noliq" title="单边挂单/未开盘：当前价位无活跃流动性，可退出 $0">未开盘·单边流动性</span>');
   if (d.softFlags && d.softFlags.noSupply) badges.push('<span class="badge unpriced">供应量读取中</span>');
   const links = Object.entries(d.links || {}).map(([k, v]) => `<a href="${v}" target="_blank" rel="noopener">${k}</a>`).join('');
   const net = +d.netIn30m || 0;

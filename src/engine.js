@@ -424,7 +424,8 @@ async function onV4Initialize(i) {
   store.setPool(key, i.poolId, 'v4', q?.sym ?? null);
   bus.emit(Events.POOLS_CHANGED, { chain: i.chain });
   bus.emit(Events.UPDATE, { ...store.get(key) });
-  log.info({ chain: i.chain, token: meme, poolId: i.poolId, tickSpacing: i.tickSpacing }, 'Pons v4 池 Initialize(二级来源)，已接 v4 定价');
+  const label = cfg.discoverFromPools ? 'v4 池 Initialize，已接 v4 定价' : 'Pons v4 池 Initialize(二级来源)，已接 v4 定价';
+  log.info({ chain: i.chain, token: meme, poolId: i.poolId, tickSpacing: i.tickSpacing }, label);
 }
 
 // ── Arc 发射台(arc-launchpad) 四事件 handler ──────────────────────────────────────────────
