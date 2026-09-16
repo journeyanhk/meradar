@@ -610,6 +610,7 @@ async function backfillArcLaunchpad(chain, lp, hours = 2) {
   const chunk = 1500n;
   let from = latest > span ? latest - span : 0n;
   let count = 0;
+  let failedChunks = 0;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   while (from <= latest) {
     const to = from + chunk - 1n > latest ? latest : from + chunk - 1n;
@@ -617,7 +618,7 @@ async function backfillArcLaunchpad(chain, lp, hours = 2) {
     for (let attempt = 0; attempt < 3 && logs === null; attempt++) {
       try { logs = await client.getLogs({ address: lp.address, fromBlock: from, toBlock: to }); }
       catch (e) {
-        if (attempt === 2) log.debug({ chain, from: from.toString(), err: e.message }, 'Arc 发射台回填分段失败(跳过，靠实时订阅兜底)');
+        if (attempt === 2) { failedChunks++; log.warn({ chain, from: from.toString(), to: to.toString(), err: e.message }, 'Arc 发射台回填分段失败(靠实时订阅兜底)'); }
         else await sleep(600 * (attempt + 1));
       }
     }
@@ -636,7 +637,9 @@ async function backfillArcLaunchpad(chain, lp, hours = 2) {
     from = to + 1n;
     await sleep(200);
   }
-  log.info({ chain, count, hours }, 'Arc 发射台启动回填完成');
+  // Arc 发射台每小时数百次发射：2 小时窗口 count==0 高度可疑(RPC 限流/端点失联)，与 Initialize 回填一致单独告警。
+  if (count === 0) log.warn({ chain, hours, failedChunks }, 'Arc 发射台回填 count==0：Arc 发射不可能为 0，RPC 可能限流/端点异常');
+  else log.info({ chain, count, hours, failedChunks }, 'Arc 发射台启动回填完成');
   return count;
 }
 
@@ -653,6 +656,7 @@ async function backfillV4Initialize(chain, hours = 2) {
   const chunk = 1500n; // Arc ~0.5s/块，段短防 getLogs 超范围
   let from = latest > span ? latest - span : 0n;
   let count = 0;
+  let failedChunks = 0;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   while (from <= latest) {
     const to = from + chunk - 1n > latest ? latest : from + chunk - 1n;
@@ -661,7 +665,7 @@ async function backfillV4Initialize(chain, hours = 2) {
       try {
         logs = await client.getLogs({ address: pm, event: v4InitializeEvent, fromBlock: from, toBlock: to });
       } catch (e) {
-        if (attempt === 2) log.debug({ chain, from: from.toString(), err: e.message }, 'Arc Initialize 回填分段失败(跳过，靠实时订阅兜底)');
+        if (attempt === 2) { failedChunks++; log.warn({ chain, from: from.toString(), to: to.toString(), err: e.message }, 'Arc Initialize 回填分段失败(靠实时订阅兜底)'); }
         else await sleep(600 * (attempt + 1));
       }
     }
@@ -678,7 +682,9 @@ async function backfillV4Initialize(chain, hours = 2) {
     from = to + 1n;
     await sleep(200);
   }
-  log.info({ chain, count, hours }, 'Arc 启动回填 Initialize 完成');
+  // Arc ~2000 池/时：2 小时窗口 count==0 在链正常时不可能 → 几乎必是 RPC 限流/端点失联，单独告警(不吞)。
+  if (count === 0) log.warn({ chain, hours, failedChunks }, 'Arc Initialize 回填 count==0：Arc 建池不可能为 0，RPC 可能限流/端点异常');
+  else log.info({ chain, count, hours, failedChunks }, 'Arc 启动回填 Initialize 完成');
   return count;
 }
 

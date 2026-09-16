@@ -8,6 +8,42 @@ import { child } from './logger.js';
 
 const log = child('discover');
 
+/**
+ * 带指数退避重建的 watchEvent 包装。
+ * viem 只在底层 socket 断开时自动重连；当 eth_subscribe 被服务端拒绝(internal error/限流)时，
+ * onError 只回调、不重试 —— 订阅就此静默失联（Arc 曾整链无数据的直接原因）。
+ * 本包装：onError → 取消旧订阅 → 指数退避(2s→4s→…→60s) → 重新 watchEvent。
+ * makeParams() 返回传给 client.watchEvent 的参数（不含 onError；onLogs 会被包裹以在有数据时重置退避）。
+ * 返回统一退订函数。
+ */
+function watchWithReconnect(client, label, chain, makeParams) {
+  let un = null;
+  let stopped = false;
+  let attempt = 0;
+  let timer = null;
+  const subscribe = () => {
+    if (stopped) return;
+    const params = makeParams();
+    const origOnLogs = params.onLogs;
+    un = client.watchEvent({
+      ...params,
+      onLogs: (logs) => { attempt = 0; origOnLogs?.(logs); }, // 有数据流入即视为健康 → 退避归零
+      onError: (e) => {
+        recordRpcError();
+        log.warn({ chain, label, err: e.message, attempt }, '订阅出错 → 退避重建(viem 不会自行重试被拒的 eth_subscribe)');
+        try { un?.(); } catch { /* noop */ }
+        un = null;
+        if (timer) return; // 已在退避排程中，避免叠加
+        const delay = Math.min(2000 * (2 ** attempt), 60000);
+        attempt++;
+        timer = setTimeout(() => { timer = null; subscribe(); }, delay);
+      },
+    });
+  };
+  subscribe();
+  return () => { stopped = true; if (timer) clearTimeout(timer); try { un?.(); } catch { /* noop */ } };
+}
+
 // Pons(curve-per-token)：curve 合约地址 → 代币地址 的映射。
 // 曲线成交(CurveBuy/Sell)按 topic0 全量订阅，emitter=curve，靠本表反查它属于哪个代币。
 // 由 TokenLaunched 实时写入 + 启动时从 DB 回灌(seedPonsCurves)，重启不丢。
@@ -61,7 +97,7 @@ export function watchChain(chain, handlers) {
 
     if (lp.type === 'arc-launchpad') {
       // Arc 发射台：单合约、每次发射四事件同 tx。签名不确证 → 订阅地址全量日志、按 topic0 解码(src/arc-launchpad.js)。
-      const un = client.watchEvent({
+      const un = watchWithReconnect(client, `arc-launchpad:${lp.id}`, chain, () => ({
         address: lp.address,
         strict: false,
         onLogs: (logs) => {
@@ -71,15 +107,14 @@ export function watchChain(chain, handlers) {
             catch (e) { log.debug({ err: e.message }, 'arc-launchpad 事件解码失败'); }
           }
         },
-        onError: (e) => { recordRpcError(); log.warn({ chain, launchpad: lp.id, err: e.message }, 'watchEvent 错误(自动重连)'); },
-      });
+      }));
       unwatchers.push(un);
       log.info({ chain, launchpad: lp.id, address: lp.address }, '订阅 Arc 发射台事件流');
       continue;
     }
 
     if (lp.type === 'fourmeme-events') {
-      const un = client.watchEvent({
+      const un = watchWithReconnect(client, `fourmeme:${lp.id}`, chain, () => ({
         address: lp.address,
         events: fourMemeEvents,
         strict: false,
@@ -90,8 +125,7 @@ export function watchChain(chain, handlers) {
             catch (e) { log.debug({ err: e.message }, 'fourmeme 事件解码失败'); }
           }
         },
-        onError: (e) => { recordRpcError(); log.warn({ chain, launchpad: lp.id, err: e.message }, 'watchEvent 错误(自动重连)'); },
-      });
+      }));
       unwatchers.push(un);
       log.info({ chain, launchpad: lp.id, address: lp.address }, '订阅 Four.meme 事件流');
       continue;
@@ -100,7 +134,7 @@ export function watchChain(chain, handlers) {
     if (lp.type === 'amm-v2' || lp.type === 'amm-v3') {
       const poolType = lp.type === 'amm-v3' ? 'v3' : 'v2';
       const event = parseAbiItem(lp.event);
-      const un = client.watchEvent({
+      const un = watchWithReconnect(client, `amm:${lp.id}`, chain, () => ({
         address: lp.address,
         event,
         strict: true,
@@ -120,8 +154,7 @@ export function watchChain(chain, handlers) {
             } catch (e) { log.debug({ err: e.message }, 'amm log 解析失败'); }
           }
         },
-        onError: (e) => { recordRpcError(); log.warn({ chain, launchpad: lp.id, err: e.message }, 'watchEvent 错误(自动重连)'); },
-      });
+      }));
       unwatchers.push(un);
       log.info({ chain, launchpad: lp.id, address: lp.address }, '订阅 AMM 工厂');
     }
@@ -131,7 +164,7 @@ export function watchChain(chain, handlers) {
   // PoolRegistered(hook) 为主来源，但 hook 事件可能缺失/延迟——Initialize 是 v4 池创建的规范信号，
   // 也是 Arc 主网 v4 的入口。engine.onV4Initialize 里按 currency0/1 反查已跟踪代币，未登记才落库(source='initialize')。
   if (cfg.poolManagerV4 && !/^0x0+$/.test(cfg.poolManagerV4)) {
-    const un = client.watchEvent({
+    const un = watchWithReconnect(client, 'v4-initialize', chain, () => ({
       address: cfg.poolManagerV4,
       event: v4InitializeEvent,
       strict: false,
@@ -151,8 +184,7 @@ export function watchChain(chain, handlers) {
           } catch (e) { log.debug({ err: e.message }, 'v4 Initialize 解码失败'); }
         }
       },
-      onError: (e) => { recordRpcError(); log.warn({ chain, err: e.message }, 'v4 Initialize 订阅错误(自动重连)'); },
-    });
+    }));
     unwatchers.push(un);
     log.info({ chain, poolManager: cfg.poolManagerV4 }, '订阅 Pons v4 PoolManager.Initialize(二级来源)');
   }
@@ -211,20 +243,19 @@ function routeFourMeme(chain, lp, l, handlers) {
 function subscribePonsCurve(chain, lp, client, handlers, unwatchers) {
   // ① 工厂事件
   if (lp.factory && !/^0x0+$/.test(lp.factory)) {
-    const un = client.watchEvent({
+    const un = watchWithReconnect(client, `pons-factory:${lp.id}`, chain, () => ({
       address: lp.factory, events: ponsFactoryEvents, strict: false,
       onLogs: (logs) => {
         recordWsLog(chain);
         for (const l of logs) { try { routePonsFactory(chain, lp, l, handlers); } catch (e) { log.debug({ err: e.message }, 'pons 工厂事件解码失败'); } }
       },
-      onError: (e) => { recordRpcError(); log.warn({ chain, launchpad: lp.id, err: e.message }, 'watchEvent 错误(自动重连)'); },
-    });
+    }));
     unwatchers.push(un);
     log.info({ chain, launchpad: lp.id, factory: lp.factory }, '订阅 Pons 工厂事件(TokenLaunched/PoolGraduated/LaunchSwept)');
   }
   // ② hook PoolRegistered（poolId↔token）
   if (lp.hook && !/^0x0+$/.test(lp.hook)) {
-    const un = client.watchEvent({
+    const un = watchWithReconnect(client, `pons-hook:${lp.id}`, chain, () => ({
       address: lp.hook, events: ponsHookEvents, strict: false,
       onLogs: (logs) => {
         recordWsLog(chain);
@@ -236,20 +267,18 @@ function subscribePonsCurve(chain, lp, client, handlers, unwatchers) {
           } catch (e) { log.debug({ err: e.message }, 'pons hook 事件解码失败'); }
         }
       },
-      onError: (e) => { recordRpcError(); log.warn({ chain, launchpad: lp.id, err: e.message }, 'watchEvent 错误(自动重连)'); },
-    });
+    }));
     unwatchers.push(un);
     log.info({ chain, launchpad: lp.id, hook: lp.hook }, '订阅 Pons hook 事件(PoolRegistered)');
   }
   // ③ 曲线成交（topic0 全量订阅）
-  const un = client.watchEvent({
+  const un = watchWithReconnect(client, `pons-curve:${lp.id}`, chain, () => ({
     events: ponsCurveEvents, strict: false,
     onLogs: (logs) => {
       recordWsLog(chain);
       for (const l of logs) { try { routePonsCurve(chain, lp, l, handlers); } catch (e) { log.debug({ err: e.message }, 'pons 曲线成交解码失败'); } }
     },
-    onError: (e) => { recordRpcError(); log.warn({ chain, launchpad: lp.id, err: e.message }, 'watchEvent 错误(自动重连)'); },
-  });
+  }));
   unwatchers.push(un);
   log.info({ chain, launchpad: lp.id }, '订阅 Pons 曲线成交(CurveBuy/CurveSell, topic0 全量)');
 }
@@ -309,7 +338,7 @@ export function resubscribeSwaps(chain, pools, onSwap) {
   const client = wsClient(chain);
   if (!pools.length) return () => {};
   const meta = new Map(pools.map((p) => [p.address.toLowerCase(), p]));
-  const un = client.watchEvent({
+  const un = watchWithReconnect(client, 'swaps', chain, () => ({
     address: pools.map((p) => p.address),
     events: swapEvents,
     strict: false,
@@ -324,8 +353,7 @@ export function resubscribeSwaps(chain, pools, onSwap) {
         } catch (e) { log.debug({ err: e.message }, 'swap 解码失败'); }
       }
     },
-    onError: (e) => { recordRpcError(); log.warn({ chain, err: e.message }, 'swap 订阅错误(自动重连)'); },
-  });
+  }));
   log.info({ chain, pools: pools.length }, '重建毕业池成交订阅(单订阅)');
   return un;
 }
@@ -382,14 +410,13 @@ export function resubscribeV4Swaps(chain, poolManager, pools, onSwap) {
   };
   for (let i = 0; i < pools.length; i += SHARD) {
     const group = pools.slice(i, i + SHARD);
-    const un = client.watchEvent({
+    const un = watchWithReconnect(client, `v4-swaps-shard:${i / SHARD}`, chain, () => ({
       address: poolManager,
       event: v4SwapEvent,
       args: { id: group.map((p) => p.poolId) }, // indexed bytes32 id → 节点侧按 poolId 过滤
       strict: false,
       onLogs: mkOnLogs(),
-      onError: (e) => { recordRpcError(); log.warn({ chain, err: e.message }, 'v4 swap 订阅错误(自动重连)'); },
-    });
+    }));
     uns.push(un);
   }
   log.info({ chain, pools: pools.length, shards: uns.length }, '重建 Pons v4 成交订阅(PoolManager, 按 poolId 定向, 分片)');
@@ -414,7 +441,7 @@ function dispatchV4Swap(l, meta, chain, onSwap) {
 export function subscribeV4SwapsFull(chain, poolManager, getMeta, onSwap) {
   const client = wsClient(chain);
   if (!poolManager || /^0x0+$/.test(poolManager)) return () => {};
-  const un = client.watchEvent({
+  const un = watchWithReconnect(client, 'v4-swaps-full', chain, () => ({
     address: poolManager,
     event: v4SwapEvent,
     strict: false,
@@ -424,8 +451,7 @@ export function subscribeV4SwapsFull(chain, poolManager, getMeta, onSwap) {
       if (!meta || meta.size === 0) return;
       for (const l of logs) dispatchV4Swap(l, meta, chain, onSwap);
     },
-    onError: (e) => { recordRpcError(); log.warn({ chain, err: e.message }, 'v4 全量成交订阅错误(自动重连)'); },
-  });
+  }));
   log.info({ chain }, '建立 v4 全量成交订阅(PoolManager 单订阅, 本地 poolId 过滤)');
   return () => { try { un(); } catch { /* noop */ } };
 }

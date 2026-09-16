@@ -154,6 +154,7 @@ export async function pollCandidate(chain, cand) {
       decimals: cand.decimals, totalSupply: cand.total_supply ? BigInt(cand.total_supply) : null,
       tickSpacing: v4meta?.tick_spacing ?? null, hooks: v4meta?.hooks ?? null,
       maxLiquiditySeen: v4meta?.max_liquidity_seen ? BigInt(v4meta.max_liquidity_seen) : 0n,
+      currency0: v4meta?.currency0 ?? null, currency1: v4meta?.currency1 ?? null,
     });
     // 记录历史最大流动性(撤池判定的「曾有」证据)：本轮读到更大值就写库，重启不丢。
     if (cand.pool_type === 'v4' && poolM?.observedLiquidity != null) {
@@ -180,8 +181,12 @@ export async function pollCandidate(chain, cand) {
   });
   const depthUsd = px.depthUsd;
   if (px.state === 'implausible') {
-    log.warn({ key: cand.key, chain, quoteSym: q?.sym, quoteUsd: quotePriceUsd, quoteDec, poolType: cand.pool_type },
-      '价格合理性钳位命中：疑似报价币单位错误，已归零(见 $MUMO 教训)');
+    const v4m = cand.pool_type === 'v4' ? (store.v4PoolById(chain, cand.pool) || store.v4PoolByToken(chain, cand.address)) : null;
+    log.warn({
+      key: cand.key, chain, quoteSym: poolM?.quoteSymbol ?? q?.sym, quoteUsd: quotePriceUsd, quoteDec, poolType: cand.pool_type,
+      priceUsd: px.priceUsd, marketCapUsd: px.marketCapUsd, depthUsd: px.depthUsd,
+      currency0: v4m?.currency0, currency1: v4m?.currency1, candQuote: cand.quote_symbol,
+    }, '价格合理性钳位命中：疑似报价币/方向错误，已归零(见 $MUMO 教训)');
   }
   const depthKind = px.source === 'curve' ? 'curve' : (cand.pool ? 'amm' : 'curve');
   // v4 池费率(百万分之→%)：优先取最近一笔 Swap 记录的 fee；无成交时退回 v4_pools 的静态费率(Initialize 落库)，

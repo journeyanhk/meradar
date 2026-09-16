@@ -14,7 +14,7 @@ import { graduatedByCurve } from '../src/pool.js';
 import { goplusCheck } from '../src/goplus.js';
 import { classifyAccount, classifyTokenBuyers, taxPositive, BUYER_DEFAULTS } from '../src/buyer.js';
 import { resolvePrice, sourceOf, PRICE_STALE_MS, PRICE_UNKNOWN_MS, isImplausibleUsd } from '../src/price.js';
-import { isFullRangePool } from '../src/enrich.js';
+import { isFullRangePool, resolveV4Quote } from '../src/enrich.js';
 import { recordPoolState, getPoolState, forgetPoolState } from '../src/poolstate.js';
 import { evaluateEntry } from '../src/entry.js';
 import { buyerRatios } from '../src/buyer.js';
@@ -1109,7 +1109,51 @@ test('Arc 原生 USDC：0x0(v4 currency0) 解析为 USDC_NATIVE(18位, $1)，0x3
   assert.equal(quoteUsd('arc', 'USDC'), 1);
 });
 
-// —— 元数据补读退避（Pons 名字「?」/市值 $0 修复）——
+// —— resolveV4Quote：v4 报价币/方向以 currency0/1 为真源，不吃 quote_symbol 的错标 ——
+
+test('resolveV4Quote：token=currency1(meme 在高位) → memeIsCurrency0=false，报价币取 currency0', () => {
+  const arc = chainConfig('arc');
+  const token = '0xabc0000000000000000000000000000000000001';
+  // 原生 USDC(0x0) 恒为 currency0，meme 为 currency1
+  const r = resolveV4Quote(arc, token, '0x0000000000000000000000000000000000000000', token);
+  assert.equal(r.memeIsCurrency0, false);
+  assert.equal(r.quoteAddr, '0x0000000000000000000000000000000000000000');
+  assert.equal(r.q.sym, 'USDC_NATIVE');
+  assert.equal(r.q.decimals, 18);
+});
+
+test('resolveV4Quote：token=currency0(meme 在低位) → memeIsCurrency0=true', () => {
+  const arc = chainConfig('arc');
+  const token = '0x0000000000000000000000000000000000000abc';
+  const quote = '0x3600000000000000000000000000000000000000'; // USDC ERC-20 视图
+  const r = resolveV4Quote(arc, token, token, quote);
+  assert.equal(r.memeIsCurrency0, true);
+  assert.equal(r.quoteAddr, quote);
+  assert.equal(r.q.sym, 'USDC');
+});
+
+test('resolveV4Quote：token 不在两腿里(映射不一致) → 返回 null，绝不瞎猜方向', () => {
+  const arc = chainConfig('arc');
+  const token = '0xdead000000000000000000000000000000000001';
+  const r = resolveV4Quote(arc, token, '0x0000000000000000000000000000000000000000', '0xbeef000000000000000000000000000000000002');
+  assert.equal(r, null);
+});
+
+test('resolveV4Quote：currency 缺失 → null(调用方回退 quote_symbol 老路径)', () => {
+  const arc = chainConfig('arc');
+  assert.equal(resolveV4Quote(arc, '0xabc', null, null), null);
+  assert.equal(resolveV4Quote(arc, null, '0x1', '0x2'), null);
+});
+
+test('resolveV4Quote：报价币未识别 → q=null 但方向仍从 currency 真源得出(避免地址序猜错)', () => {
+  const arc = chainConfig('arc');
+  const token = '0xabc0000000000000000000000000000000000001';
+  const unknownQuote = '0x9999000000000000000000000000000000000009'; // 不在报价币表
+  const r = resolveV4Quote(arc, token, unknownQuote, token);
+  assert.equal(r.q, null, '未识别报价币 → q=null(调用方 priced=false)');
+  assert.equal(r.memeIsCurrency0, false, '方向仍以 currency 真源判定');
+  assert.equal(r.quoteAddr, unknownQuote);
+});
 
 test('shouldRetryMeta：字段齐全不补；缺字段且未在退避窗内则补；达上限放弃', () => {
   const now = 1_000_000;

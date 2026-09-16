@@ -267,6 +267,23 @@ export function isFullRangePool(cfg, hooks, tickSpacing) {
   return Number(tickSpacing || 0) >= 200;
 }
 
+// v4 报价币与方向真源(纯函数)：以 v4_pools 的 currency0/currency1(Initialize/PoolRegistered 的链上事实)判定，
+// 不依赖 candidates.quote_symbol(易被多条路径写坏 → 报价币错标 → memeIsCurrency0 翻转 → 价格倒数 → 触发钳位整批归零)。
+//   memeIsCurrency0 = (currency0 === token)；报价币地址 = 另一侧；符号/小数位经 resolveQuote(地址) → 静态/动态表。
+// token 不在两腿里(数据不一致) 或 currency 缺失 → 返回 null，调用方回退 quote_symbol 老路径。
+export function resolveV4Quote(cfg, token, currency0, currency1) {
+  if (!token || !currency0 || !currency1) return null;
+  const tk = token.toLowerCase();
+  const c0 = String(currency0).toLowerCase();
+  const c1 = String(currency1).toLowerCase();
+  let memeIsCurrency0, quoteAddr;
+  if (c0 === tk) { memeIsCurrency0 = true; quoteAddr = c1; }
+  else if (c1 === tk) { memeIsCurrency0 = false; quoteAddr = c0; }
+  else return null; // token 不在池子两腿里 → 映射不一致，不猜
+  const q = resolveQuote(cfg, quoteAddr); // 未识别报价币 → null(调用方 priced=false，绝不瞎猜方向)
+  return { q, quoteAddr, memeIsCurrency0 };
+}
+
 // v4 定价/深度纯函数(无 RPC，供单测冻结断言)。sqrtPriceX96/liquidity 为 bigint。
 // price：(sqrtP/2^96)²=currency1/currency0(raw) → ×10^(dec0−dec1) 得 human → 取 quote-per-meme → ×quoteUsd。
 // depth：全区间(Pons)虚拟储备 currency0=L/sqrtP、currency1=L·sqrtP；报价腿×2。
@@ -290,28 +307,35 @@ export function computeV4Metrics({ sqrtPriceX96, liquidity, memeIsCurrency0, mem
 
 // 读池子 -> 流动性/价格/市值。支持 V2(getReserves)、V3(slot0)、v4(extsload)。
 // v4：pool 传 poolId(bytes32)、poolType='v4'；池地址=cfg.poolManagerV4。currency 排序由地址推导(原生 0x0 恒为 currency0)。
-export async function readPoolMetrics(chain, { pool, poolType, token, quote, decimals, totalSupply, tickSpacing = null, hooks = null, maxLiquiditySeen = 0n }) {
-  if (!pool || !quote) return null;
+export async function readPoolMetrics(chain, { pool, poolType, token, quote, decimals, totalSupply, tickSpacing = null, hooks = null, maxLiquiditySeen = 0n, currency0 = null, currency1 = null }) {
+  if (!pool) return null;
   const cfg = chainConfig(chain);
-  const q = resolveQuote(cfg, quote);
-  if (!q) { log.debug({ quote }, '无法解析报价币，跳过池子定价'); return null; }
   const client = httpClient(chain);
-  const quoteUsd = quoteUsdPrice(chain, cfg, q.sym);
-  const priced = quoteUsd != null;
   const memeDec = decimals || 18;
   const supply = totalSupply ? Number(formatUnits(totalSupply, memeDec)) : 0;
 
   try {
     if (poolType === 'v4') {
-      // v4 currency 按地址升序；原生 ETH(0x0) 恒为最小 → currency0。故 meme 是否 currency0 = memeAddr < quoteAddr。
-      const memeIsCurrency0 = token.toLowerCase() < q.address.toLowerCase();
+      // 报价币与方向以 v4_pools.currency0/1 为真源；缺失或未识别才回退 quote_symbol(老行)。
+      const v4q = resolveV4Quote(cfg, token, currency0, currency1);
+      let qv, memeIsCurrency0;
+      if (v4q && v4q.q) { qv = v4q.q; memeIsCurrency0 = v4q.memeIsCurrency0; }
+      else {
+        // 回退：无 currency 或报价币未识别 → 用 quote_symbol。仍拿不到方向真源时用地址序推(与历史一致)。
+        qv = quote ? resolveQuote(cfg, quote) : null;
+        if (!qv) { log.debug({ chain, pool, quote, currency0, currency1 }, 'v4 报价币无法解析(currency 与 quote_symbol 均缺) → 跳过定价'); return null; }
+        // currency 已知但报价币未识别 → 方向仍按 currency 真源，避免地址序猜错(见 $MUMO 倒数教训)。
+        memeIsCurrency0 = v4q ? v4q.memeIsCurrency0 : token.toLowerCase() < qv.address.toLowerCase();
+      }
+      const quoteUsdV4 = quoteUsdPrice(chain, cfg, qv.sym);
+      const pricedV4 = quoteUsdV4 != null;
       // 事件驱动：优先用最近一笔 Swap 写入的池状态(零 RPC)；无新鲜状态才 extsload 直读。
       const cached = getPoolState(chain, pool);
       const st = cached || await readV4PoolState(chain, cfg.poolManagerV4, pool);
       if (!st) return null;
       const m = computeV4Metrics({
         sqrtPriceX96: st.sqrtPriceX96, liquidity: st.liquidity, memeIsCurrency0,
-        memeDec, quoteDec: q.decimals, quoteUsd, supplyHuman: supply,
+        memeDec, quoteDec: qv.decimals, quoteUsd: quoteUsdV4, supplyHuman: supply,
       });
       // v4 的 liquidity 是「当前 tick 活跃流动性」。撤池判定改用「曾有流动性」证据(从有到无 = 真 rug)，
       // 不再靠「tickSpacing≥200 = 全区间」这条从 Pons 带来的假设 —— 该假设在 Arc 单边发射池上必然误判：
@@ -321,13 +345,20 @@ export async function readPoolMetrics(chain, { pool, poolType, token, quote, dec
       const empty = st.liquidity === 0n;
       const hadLiquidity = (maxLiquiditySeen ?? 0n) > 0n || st.liquidity > 0n;
       return {
-        ...m, quoteSymbol: q.sym, priced,
+        ...m, quoteSymbol: qv.sym, priced: pricedV4,
         drained: empty && hadLiquidity,
         noActiveLiquidity: empty && !hadLiquidity,
         observedLiquidity: st.liquidity,
         updatedAt: cached ? st.ts : Date.now(), source: cached ? 'event' : 'rpc',
       };
     }
+
+    // V2/V3：报价币仍取 quote_symbol(这两类由 PairCreated 事件带 token0/token1，quote_symbol 可靠)。
+    if (!quote) return null;
+    const q = resolveQuote(cfg, quote);
+    if (!q) { log.debug({ quote }, '无法解析报价币，跳过池子定价'); return null; }
+    const quoteUsd = quoteUsdPrice(chain, cfg, q.sym);
+    const priced = quoteUsd != null;
 
     if (poolType === 'v3') {
       const [slot0, token0, qBal, tBal] = await client.multicall({
