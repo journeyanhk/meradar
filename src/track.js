@@ -11,7 +11,7 @@ import { config, chainConfig, entryFilterFor } from './config.js';
 import { httpClient } from './chain.js';
 import { bus, Events } from './bus.js';
 import * as momentum from './momentum.js';
-import { forgetPoolState } from './poolstate.js';
+import { forgetPoolState, getPoolState } from './poolstate.js';
 import { classifyTokenBuyers } from './buyer.js';
 import { child } from './logger.js';
 import { formatUnits } from 'viem';
@@ -179,6 +179,9 @@ export async function pollCandidate(chain, cand) {
       '价格合理性钳位命中：疑似报价币单位错误，已归零(见 $MUMO 教训)');
   }
   const depthKind = px.source === 'curve' ? 'curve' : (cand.pool ? 'amm' : 'curve');
+  // v4 池费率(百万分之→%)：取最近一笔 Swap 记录的 fee(静态费率池也据此)，供费率硬拒(90.1% 反狙击池)。
+  const poolFee = cand.pool_type === 'v4' ? getPoolState(chain, cand.pool, Infinity)?.fee : null;
+  const poolFeePct = poolFee != null ? (poolFee / 1e6) * 100 : null;
   const offersPct = curve?.offersPct ?? prev?.offers_pct ?? 0;
   // 曲线毕业进度 = funds / maxRaising（同为报价币单位，比值与小数位无关），比「剩余%」直观。
   const maxRaisingHuman = cand.max_raising ? Number(cand.max_raising) / (10 ** quoteDec) : 0;
@@ -262,6 +265,7 @@ export async function pollCandidate(chain, cand) {
     liquidityUsd: depthUsd,
     depthUsd,
     depthKind,
+    poolFeePct,
     offersPct,
     curveProgressPct,
     priceUsd: px.priceUsd,
@@ -305,6 +309,7 @@ export async function pollCandidate(chain, cand) {
     graduated: cand.graduated ? 1 : 0,
     depth_usd: depthUsd,
     depth_kind: depthKind,
+    pool_fee_pct: poolFeePct,
     offers_pct: offersPct,
     curve_progress_pct: curveProgressPct,
     net_in_30m: flow.net30,

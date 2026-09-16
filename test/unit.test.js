@@ -1144,7 +1144,7 @@ test('metaBackoffMs：1m,1m,5m,5m,15m…索引超界取末位 15m', () => {
 // —— 可试仓 v1（evaluateEntry 纯函数）——
 const EF = {
   enabled: true, auditVersion: 'v1.1',
-  hard: { minDepthCurveUsd: 3000, minDepthAmmUsd: 8000, maxMcapUsd: 300000, requirePriceOk: true, minCurveProgressPct: 30, maxCurveProgressPct: 95, curveObserveBand: [75, 90] },
+  hard: { minDepthCurveUsd: 3000, minDepthAmmUsd: 8000, maxMcapUsd: 300000, requirePriceOk: true, minCurveProgressPct: 30, maxCurveProgressPct: 95, curveObserveBand: [75, 90], maxPoolFeePct: 10 },
   structure: { minNaturalRatio: 0.45, maxSniperRatio: 0.40, maxFarmRatio: 0.30, maxDustRatio: 0.60, maxFreshRatio: 0.30, minNaturalBuyers30m: 5, minBuyerCount: 12 },
   momentum: { minNetIn30m: 500, tierANetIn30m: 2000, maxDrawdownPct: 65, graduatedWithinMin: 60, requireAccelForA: true },
   sizing: { depthPct: 0.02, tierAMaxUsd: 200, tierBMaxUsd: 100, unverifiedHalve: true, roundTo: 10 },
@@ -1278,4 +1278,17 @@ test('可试仓v1.1：新钱包占比过高(40%>30%) → 硬拒', () => {
   const e = evaluateEntry(m, EF, freshy);
   assert.equal(e.ok, false);
   assert.ok(e.redFlags.some((r) => r.includes('新钱包')));
+});
+
+test('可试仓v1.1：池费率过高(90.1%>10%) → 硬拒', () => {
+  const m = { depthKind: 'amm', depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, poolFeePct: 90.1, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, false);
+  assert.ok(e.redFlags.some((r) => r.includes('费率过高')));
+});
+
+test('可试仓v1.1：正常费率(1%)不触发费率拒 → 放行', () => {
+  const m = { depthKind: 'amm', depthUsd: 20000, marketCapUsd: 50000, peakMcapUsd: 60000, priceState: 'ok', netIn30m: 3000, naturalBuyers30m: 8, poolFeePct: 1, tradeSafety: { state: 'PASS' } };
+  const e = evaluateEntry(m, EF, goodCounts);
+  assert.equal(e.ok, true);
 });

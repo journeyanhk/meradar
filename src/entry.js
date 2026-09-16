@@ -16,7 +16,7 @@ function floorTo(v, step) {
 }
 
 /**
- * @param m      本轮 metrics(depthUsd/depthKind/curveProgressPct/marketCapUsd/peakMcapUsd/priceState/netIn30m/netIn1h/graduated/graduatedAt/now/tradeSafety/...)
+ * @param m      本轮 metrics(depthUsd/depthKind/curveProgressPct/poolFeePct/marketCapUsd/peakMcapUsd/priceState/netIn30m/netIn1h/graduated/graduatedAt/now/tradeSafety/...)
  * @param ef     链级 entryFilter 配置(entryFilterFor(chain))
  * @param counts 本轮买家分级计数(track.js 的 softFlags：{buyerCount, naturalBuyers, sniper, ...})；缺失=数据不足
  * @returns { ok, tier:'A'|'B'|null, sizeUsd, reasons[], redFlags[], auditVersion } | null(未启用)
@@ -47,6 +47,8 @@ export function evaluateEntry(m, ef, counts) {
   if (depthUsd < minDepth) redFlags.push(`深度不足 ${Math.round(depthUsd)}<${minDepth}`);
   else reasons.push(`深度 $${Math.round(depthUsd)}`);
   if (hard.maxMcapUsd && mcap > hard.maxMcapUsd) redFlags.push(`市值超上限 ${Math.round(mcap)}>${hard.maxMcapUsd}`);
+  // 池费率硬拒：Arc 发射台有 90.1% 静态费率的反狙击池，进去必被高费吃穿 → maxPoolFeePct 超限即拒。
+  if (hard.maxPoolFeePct != null && m.poolFeePct != null && m.poolFeePct > hard.maxPoolFeePct) redFlags.push(`费率过高 ${m.poolFeePct.toFixed(1)}%>${hard.maxPoolFeePct}%`);
   // 曲线进度带：仅曲线期适用。<min 太早(易归零)、>max 已被抢跑(接盘)；带内加一条 reason 供解释。
   if (isCurve) {
     const prog = m.curveProgressPct || 0;

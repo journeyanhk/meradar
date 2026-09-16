@@ -85,6 +85,7 @@ body {
 .badge.rej { color: var(--t2); border-color: var(--t2); }
 /* M3-1b 价格状态：撤池(红)、价格未知/陈旧(灰)、当前价位无流动性(灰) */
 .badge.withdrawn { color: #fff; background: var(--t2); border-color: var(--t2); }
+.badge.feehigh { color: #fff; background: var(--t2); border-color: var(--t2); font-weight: 700; }
 .badge.unknown { color: var(--muted); border-color: var(--muted); border-style: dashed; }
 .badge.stale { color: var(--muted); border-color: var(--line); opacity: .85; }
 .badge.noliq { color: var(--t1); border-color: var(--t1); }

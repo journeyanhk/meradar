@@ -221,6 +221,7 @@ ensureColumns('candidates', [
   // 可试仓 v1：每轮 evaluateEntry 的结果 JSON({ ok, tier, sizeUsd, reasons, redFlags, auditVersion })。
   // 只读展示/告警/统计，不参与分级(evaluateTier)。不写时保留上轮值；setEntry 不动 updated_at(不干扰排序/归档)。
   ['entry_json', 'entry_json TEXT'],
+  ['pool_fee_pct', 'pool_fee_pct REAL'],               // v4 池动态费率(%)：90.1% 等反狙击高费率池 → 可试仓硬拒 + 卡片显示
 ]);
 // trades 已有 price(成交时单价 USD)=price_at_trade，无需重复列；只补 mcap_at_trade：
 // 成交时市值(USD)，供聪明钱「入场市值」建模、早期队列成本、纸面 entry_mcap 直接取用，免回查快照。
@@ -263,6 +264,7 @@ const stmt = {
       depth_usd=@depth_usd, depth_kind=@depth_kind, offers_pct=@offers_pct,
       net_in_30m=@net_in_30m, net_in_1h=@net_in_1h, max_buy_10m=@max_buy_10m,
       buy_ratio_30m=@buy_ratio_30m, new_buyers_30m=@new_buyers_30m, curve_progress_pct=@curve_progress_pct,
+      pool_fee_pct=@pool_fee_pct,
       price_source=@price_source, price_updated_at=@price_updated_at, price_state=@price_state,
       updated_at=@updated_at WHERE key=@key
   `),
@@ -279,6 +281,8 @@ const stmt = {
   earliestSameSymbol: db.prepare(`SELECT key, discovered_at FROM candidates WHERE chain=? AND symbol=? ORDER BY discovered_at ASC LIMIT 1`),
   staleSeen: db.prepare(`SELECT key, address FROM candidates WHERE status='seen' AND discovered_at < ? LIMIT 5000`),
   deleteStaleSeen: db.prepare(`DELETE FROM candidates WHERE status='seen' AND discovered_at < ?`),
+  staleSeenChain: db.prepare(`SELECT key, address FROM candidates WHERE chain=? AND status='seen' AND discovered_at < ? LIMIT 5000`),
+  deleteStaleSeenChain: db.prepare(`DELETE FROM candidates WHERE chain=? AND status='seen' AND discovered_at < ?`),
   activeCandidates: db.prepare(`SELECT * FROM candidates WHERE status='active' ORDER BY (tier='T3') DESC, (tier='T2') DESC, updated_at DESC LIMIT ?`),
   listFeed: db.prepare(`
     SELECT * FROM candidates WHERE status IN ('active','archived','rejected')
@@ -403,6 +407,7 @@ export const store = {
       key, updated_at: Date.now(),
       volume_usd: 0, depth_usd: 0, depth_kind: 'curve', offers_pct: 0,
       net_in_30m: 0, net_in_1h: 0, max_buy_10m: 0, buy_ratio_30m: 0, new_buyers_30m: 0, curve_progress_pct: 0,
+      pool_fee_pct: null,
       price_source: null, price_updated_at: null, price_state: null,
       ...m,
     });
@@ -420,6 +425,8 @@ export const store = {
   earliestSameSymbol(chain, symbol) { return stmt.earliestSameSymbol.get(chain, symbol); },
   staleSeen(beforeMs) { return stmt.staleSeen.all(beforeMs); },
   deleteStaleSeen(beforeMs) { return stmt.deleteStaleSeen.run(beforeMs).changes; },
+  staleSeenChain(chain, beforeMs) { return stmt.staleSeenChain.all(chain, beforeMs); },
+  deleteStaleSeenChain(chain, beforeMs) { return stmt.deleteStaleSeenChain.run(chain, beforeMs).changes; },
   activeCandidates(limit = 400) { return stmt.activeCandidates.all(limit); },
   feed(limit = 200, chain = null) {
     return chain && chain !== 'all' ? stmt.listFeedByChain.all(chain, limit) : stmt.listFeed.all(limit);

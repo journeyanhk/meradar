@@ -342,13 +342,7 @@ export function resubscribeV4Swaps(chain, poolManager, pools, onSwap) {
   const uns = [];
   const mkOnLogs = () => (logs) => {
     recordWsLog(chain);
-    for (const l of logs) {
-      const p = meta.get(String(l.args?.id || '').toLowerCase());
-      if (!p) continue;
-      normalizeSwapV4(l, p, chain)
-        .then((norm) => { if (norm) onSwap(norm); })
-        .catch((e) => log.debug({ err: e.message }, 'v4 swap 解码失败'));
-    }
+    for (const l of logs) dispatchV4Swap(l, meta, chain, onSwap);
   };
   for (let i = 0; i < pools.length; i += SHARD) {
     const group = pools.slice(i, i + SHARD);
@@ -364,6 +358,39 @@ export function resubscribeV4Swaps(chain, poolManager, pools, onSwap) {
   }
   log.info({ chain, pools: pools.length, shards: uns.length }, '重建 Pons v4 成交订阅(PoolManager, 按 poolId 定向, 分片)');
   return () => uns.forEach((u) => { try { u(); } catch { /* noop */ } });
+}
+
+// 单条 v4 Swap log → 本地 poolId→meta 命中才归一化落库；未命中(非我们跟踪的池)直接丢。resubscribe/full 共用。
+function dispatchV4Swap(l, meta, chain, onSwap) {
+  const p = meta.get(String(l.args?.id || '').toLowerCase());
+  if (!p) return;
+  normalizeSwapV4(l, p, chain)
+    .then((norm) => { if (norm) onSwap(norm); })
+    .catch((e) => log.debug({ err: e.message }, 'v4 swap 解码失败'));
+}
+
+/**
+ * v4 全量成交订阅（Arc 首周）：对 PoolManager.Swap 单条订阅所有池，本地按 poolId→meta 过滤。
+ * 每小时两千个带独立 hook 的 v4 池，「按 seen 池分片重建」会不停抖动；改为订阅常驻、只刷新 meta 表。
+ * getMeta(): 返回当前 Map<poolIdLower, meta>（engine 在 POOLS_CHANGED 时原地替换，订阅不重建）。
+ */
+export function subscribeV4SwapsFull(chain, poolManager, getMeta, onSwap) {
+  const client = wsClient(chain);
+  if (!poolManager || /^0x0+$/.test(poolManager)) return () => {};
+  const un = client.watchEvent({
+    address: poolManager,
+    event: v4SwapEvent,
+    strict: false,
+    onLogs: (logs) => {
+      recordWsLog(chain);
+      const meta = getMeta();
+      if (!meta || meta.size === 0) return;
+      for (const l of logs) dispatchV4Swap(l, meta, chain, onSwap);
+    },
+    onError: (e) => { recordRpcError(); log.warn({ chain, err: e.message }, 'v4 全量成交订阅错误(自动重连)'); },
+  });
+  log.info({ chain }, '建立 v4 全量成交订阅(PoolManager 单订阅, 本地 poolId 过滤)');
+  return () => { try { un(); } catch { /* noop */ } };
 }
 
 /**
@@ -404,5 +431,6 @@ async function normalizeSwapV4(l, p, chain) {
     chain, address: p.token, account, side: c.side, quoteHuman, quoteSym: p.quoteSym,
     tokenHuman, block: Number(l.blockNumber || 0), ts: Date.now(),
     pool: p.poolId, poolType: 'v4', sqrtPriceX96: a.sqrtPriceX96, liquidity: a.liquidity, tick: a.tick,
+    fee: a.fee != null ? Number(a.fee) : null, // v4 动态费率(百万分之)：供费率硬拒(90.1% 反狙击池)
   };
 }

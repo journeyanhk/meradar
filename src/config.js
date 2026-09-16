@@ -29,7 +29,7 @@ export const config = {
     // logsHttp 为 getLogs/回填/自检 专用端点（留空回落 http）：官方公共端点密集查询会 429，
     // 可指向 Alchemy 等第二路只承接回填，用量小、免费额度足。
     bsc: { http: env('BSC_HTTP'), ws: env('BSC_WS'), logsHttp: env('BSC_LOGS_HTTP') },
-    arc: { http: env('ARC_HTTP'), ws: env('ARC_WS'), logsHttp: env('ARC_LOGS_HTTP') },
+    arc: { http: env('ARC_HTTP'), ws: env('ARC_WS'), readHttp: env('ARC_READ_HTTP'), logsHttp: env('ARC_LOGS_HTTP') },
     // Robinhood Chain：官方 HTTP 做兜底；logsHttp(Alchemy)做 getLogs 回填(官方对密集查询 429)，
     // dRPC HTTP 做只读调用(name/symbol/multicall/往返 state override，比官方公共端点稳、不易 429)，
     // ws 主路 dRPC + 第二路 Alchemy(逗号分隔)。均有默认公共端点，未配 .env 也能跑（付费端点更稳，可在 .env 覆盖）。

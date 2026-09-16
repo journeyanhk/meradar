@@ -1,4 +1,4 @@
-import { watchChain, resubscribeSwaps, resubscribeV4Swaps, registerPonsCurve, seedPonsCurves, ponsTokenOf } from './discover.js';
+import { watchChain, resubscribeSwaps, resubscribeV4Swaps, subscribeV4SwapsFull, registerPonsCurve, seedPonsCurves, ponsTokenOf } from './discover.js';
 import { readToken, quoteUsd, resolveQuote, readTokenInfo } from './enrich.js';
 import { scoreCandidate } from './score.js';
 import { store } from './db.js';
@@ -208,7 +208,7 @@ async function onSwap(sw) {
   // 事件驱动定价：v4 Swap 自带 sqrtPriceX96+liquidity → 写 poolState，track 本轮直接据此算价、跳过 extsload。
   // 对 seen/active 都写(价格随时可算)。
   if (sw.poolType === 'v4' && sw.pool && sw.sqrtPriceX96 != null && sw.liquidity != null) {
-    recordPoolState(sw.chain, sw.pool, { sqrtPriceX96: sw.sqrtPriceX96, liquidity: sw.liquidity, tick: sw.tick, ts: sw.ts });
+    recordPoolState(sw.chain, sw.pool, { sqrtPriceX96: sw.sqrtPriceX96, liquidity: sw.liquidity, tick: sw.tick, ts: sw.ts, fee: sw.fee });
   }
   const isBuy = sw.side === 'buy';
   momentum.onTrade({ token: sw.address, account: isBuy ? sw.account : null, isBuy, ts: sw.ts });
@@ -440,10 +440,9 @@ function rebuildSwaps(chain) {
 
 // Pons v4 毕业池定向订阅：按 active 且 pool_type='v4' 的候选取 v4_pools 元信息，按 poolId 集合订阅 PoolManager.Swap。
 const v4SwapUnwatch = new Map(); // chain -> unwatch
-function rebuildV4Swaps(chain) {
+const v4Meta = new Map();        // chain -> Map<poolIdLower, meta>（full 模式：订阅常驻，POOLS_CHANGED 只换此表）
+function buildV4Pools(chain) {
   const cfg = chainConfig(chain);
-  const pm = cfg.poolManagerV4;
-  if (!pm || /^0x0+$/.test(pm)) return;
   const pools = [];
   for (const r of store.swapPoolsFor(chain, !!cfg.discoverFromPools).filter((r) => r.pool && r.pool_type === 'v4')) {
     const vp = store.v4PoolById(chain, r.pool) || store.v4PoolByToken(chain, r.address);
@@ -454,6 +453,21 @@ function rebuildV4Swaps(chain) {
       quoteDecimals: q.decimals || 18, tokenDecimals: r.decimals || 18,
       memeIsCurrency0: (vp.currency0 || '') === r.address.toLowerCase(),
     });
+  }
+  return pools;
+}
+function rebuildV4Swaps(chain) {
+  const cfg = chainConfig(chain);
+  const pm = cfg.poolManagerV4;
+  if (!pm || /^0x0+$/.test(pm)) return;
+  const pools = buildV4Pools(chain);
+  // full 模式(Arc 首周)：PoolManager 单条全量订阅常驻，POOLS_CHANGED 只原地替换 poolId→meta 表，不重建订阅。
+  if (cfg.v4SwapSubscription === 'full') {
+    v4Meta.set(chain, new Map(pools.map((p) => [String(p.poolId).toLowerCase(), p])));
+    if (!v4SwapUnwatch.has(chain)) {
+      v4SwapUnwatch.set(chain, subscribeV4SwapsFull(chain, pm, () => v4Meta.get(chain), (sw) => onSwap(sw).catch((e) => log.debug({ err: e.message }, 'onSwap(v4)'))));
+    }
+    return;
   }
   v4SwapUnwatch.get(chain)?.();
   v4SwapUnwatch.set(chain, pools.length ? resubscribeV4Swaps(chain, pm, pools, (sw) => onSwap(sw).catch((e) => log.debug({ err: e.message }, 'onSwap(v4)'))) : null);

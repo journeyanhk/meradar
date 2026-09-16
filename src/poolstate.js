@@ -9,12 +9,13 @@
 
 export const POOL_STATE_FRESH_MS = 60_000; // 距最后一笔成交 <60s 视为新鲜，可跳过 RPC
 
-const state = new Map(); // `${chain}:${poolIdLower}` -> { sqrtPriceX96:bigint, liquidity:bigint, tick, ts }
+const state = new Map(); // `${chain}:${poolIdLower}` -> { sqrtPriceX96:bigint, liquidity:bigint, tick, fee, ts }
 
 // 记录一笔 Swap 后的池状态。sqrtPriceX96/liquidity 为 bigint；缺字段则忽略(不覆盖旧值)。
-export function recordPoolState(chain, pool, { sqrtPriceX96, liquidity, tick = null, ts = Date.now() } = {}) {
+// fee：v4 动态费率(百万分之，如 10000=1% / 901000=90.1%)，随 Swap 事件到达 → 供费率硬拒；缺则记 null。
+export function recordPoolState(chain, pool, { sqrtPriceX96, liquidity, tick = null, fee = null, ts = Date.now() } = {}) {
   if (!pool || sqrtPriceX96 == null || liquidity == null) return;
-  state.set(`${chain}:${String(pool).toLowerCase()}`, { sqrtPriceX96, liquidity, tick, ts });
+  state.set(`${chain}:${String(pool).toLowerCase()}`, { sqrtPriceX96, liquidity, tick, fee, ts });
 }
 
 // 取新鲜的池状态；无记录或已陈旧(>maxAgeMs)返回 null → 调用方回退 RPC。

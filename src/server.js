@@ -97,6 +97,7 @@ function decorate(c) {
     priceUnknown: c.price_updated_at ? (Date.now() - c.price_updated_at) > PRICE_UNKNOWN_MS : false,
     liquidityWithdrawn: !!(c.graduated && c.pool && (c.price_usd || 0) === 0 && (c.depth_usd || 0) === 0),
     depthUsd: c.depth_usd || 0, depthKind: c.depth_kind || 'curve', offersPct: c.offers_pct || 0,
+    poolFeePct: c.pool_fee_pct ?? null,
     curveProgressPct: c.curve_progress_pct || 0, quoteSymbol: c.quote_symbol || null,
     peakMcapUsd: peak, drawdownPct,
     netIn30m: c.net_in_30m || 0, netIn1h: c.net_in_1h || 0,

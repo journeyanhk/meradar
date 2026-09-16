@@ -81,15 +81,20 @@ async function main() {
     if (removed) logger.debug({ removed }, '清理过期成交记录');
   }, 3600_000);
 
-  // seen 清理：登记超 24h 仍无动量升级的候选直接删除（本就是噪声），并释放内存动量状态。
+  // seen 清理：登记超 N 小时仍无动量升级的候选直接删除（本就是噪声），并释放内存动量状态。
+  // 默认 24h；高频建池链(Arc ~2000 池/小时)用 chains.<chain>.seenCleanupHours 缩短(6h)，防 seen 堆积。
   // 关键：必须删除而非归档——归档后行仍存在，懒注册会因「行已存在」跳过它，
-  // 导致「发行超 24h 才启动」的慢热币被永久忽略；删除后其首次买入会重新懒注册。
+  // 导致「发行超 N 小时才启动」的慢热币被永久忽略；删除后其首次买入会重新懒注册。
   function cleanupStaleSeen() {
-    const cutoff = Date.now() - 24 * 3600 * 1000;
-    const stale = store.staleSeen(cutoff);
-    for (const s of stale) momentum.forget(s.address);
-    const removed = store.deleteStaleSeen(cutoff);
-    if (removed) logger.debug({ removed }, '删除陈旧 seen 候选(允许日后懒注册重登记)');
+    const now = Date.now();
+    for (const chain of config.enabledChains) {
+      const hours = chainConfig(chain).seenCleanupHours ?? 24;
+      const cutoff = now - hours * 3600 * 1000;
+      const stale = store.staleSeenChain(chain, cutoff);
+      for (const s of stale) momentum.forget(s.address);
+      const removed = store.deleteStaleSeenChain(chain, cutoff);
+      if (removed) logger.debug({ chain, removed, hours }, '删除陈旧 seen 候选(允许日后懒注册重登记)');
+    }
   }
   setInterval(cleanupStaleSeen, 3600_000);
 
