@@ -1,6 +1,7 @@
 import { config, chainConfig } from './config.js';
 import { startServer } from './server.js';
 import { startEngine, backfillRecentCreates } from './engine.js';
+import { startPaper } from './paper.js';
 import { logsClient, measureSecPerBlock } from './chain.js';
 import { refreshBnbUsd, getBnbUsd, refreshNativeUsd, getNativeUsd, hasLiveNativeUsd } from './enrich.js';
 import { refreshDynamicQuotes } from './quotePrice.js';
@@ -81,6 +82,12 @@ async function main() {
     if (removed) logger.debug({ removed }, '清理过期成交记录');
   }, 3600_000);
 
+  // 纸面标记清理：保留 30 天(持仓 horizon 24h + 复盘窗)，每小时清一次。仅清 marks，仓位表长期保留供统计。
+  setInterval(() => {
+    const removed = store.purgePaperMarks(Date.now() - 30 * 24 * 3600 * 1000);
+    if (removed) logger.debug({ removed }, '清理过期纸面标记');
+  }, 3600_000);
+
   // seen 清理：登记超 N 小时仍无动量升级的候选直接删除（本就是噪声），并释放内存动量状态。
   // 默认 24h；高频建池链(Arc ~2000 池/小时)用 chains.<chain>.seenCleanupHours 缩短(6h)，防 seen 堆积。
   // 关键：必须删除而非归档——归档后行仍存在，懒注册会因「行已存在」跳过它，
@@ -114,6 +121,7 @@ async function main() {
   if (restored) logger.info({ restored }, '已回灌 active 买家集合');
 
   startEngine();
+  startPaper();
 }
 
 main().catch((e) => {

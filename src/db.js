@@ -182,6 +182,54 @@ CREATE TABLE IF NOT EXISTS pool_creators (
   tx       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_poolcreators_chain_ts ON pool_creators(chain, ts);
+
+-- M4 纸面引擎（只读模拟）：每个候选在信号点用名义 $100 模拟买入、追踪 24h 回报。
+-- 四个分组(非互斥)：baseline_seen(所有活跃候选=对照)/tier_t1/tier_t2/entry_pass，UNIQUE(key,grp) 保证每组每币至多一仓。
+-- 不持有自己的 RPC：开仓价取该轮 metrics.priceUsd，后续 mark 取候选行 price_usd(归档后冻结=诚实标记)。
+-- status: open(持仓中) | closed(到期平仓) | deferred(信号点门槛未过、延期重试) | deferred_expired(延期到期仍不可开) | skipped(费率≥上限不开)。
+-- 往返成本(roundtrip_cost_pct)开仓时固化，每次 mark 的 pnl 都是「此刻退出」的净值(已扣往返)。
+CREATE TABLE IF NOT EXISTS paper_positions (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  key                TEXT NOT NULL,
+  chain              TEXT NOT NULL,
+  grp                TEXT NOT NULL,     -- baseline_seen | tier_t1 | tier_t2 | entry_pass
+  status             TEXT NOT NULL,     -- open | closed | deferred | deferred_expired | skipped
+  signal_ts          INTEGER NOT NULL,  -- 首次进入该组的时刻(信号点)
+  open_ts            INTEGER,           -- 实际开仓时刻(门槛通过时)
+  entry_price_usd    REAL,
+  entry_mcap_usd     REAL,
+  notional_usd       REAL,
+  roundtrip_cost_pct REAL,
+  horizon_end_ts     INTEGER,           -- open_ts + horizonHours
+  defer_until_ts     INTEGER,           -- 延期截止(deferMinutes)
+  close_ts           INTEGER,
+  close_price_usd    REAL,
+  close_mcap_usd     REAL,
+  close_reason       TEXT,              -- horizon | ...
+  pnl_usd            REAL,
+  pnl_pct            REAL,
+  peak_price_usd     REAL,
+  trough_price_usd   REAL,
+  last_price_usd     REAL,
+  last_mcap_usd      REAL,
+  last_mark_ts       INTEGER,
+  skip_reason        TEXT,
+  UNIQUE(key, grp)
+);
+CREATE INDEX IF NOT EXISTS idx_paper_pos_status ON paper_positions(status);
+CREATE INDEX IF NOT EXISTS idx_paper_pos_grp ON paper_positions(grp, status);
+
+-- 纸面标记序列：每次 mark(60s 循环 + 事件即时)落一行，供回报曲线/回撤复盘。position_id→paper_positions.id。
+CREATE TABLE IF NOT EXISTS paper_marks (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  position_id INTEGER NOT NULL,
+  ts          INTEGER NOT NULL,
+  price_usd   REAL,
+  mcap_usd    REAL,
+  pnl_usd     REAL,
+  pnl_pct     REAL
+);
+CREATE INDEX IF NOT EXISTS idx_paper_marks_pos ON paper_marks(position_id, ts);
 `);
 
 // 幂等迁移：node:sqlite 错误信息少，用 PRAGMA table_info 判断列是否存在再 ADD COLUMN，
@@ -423,6 +471,37 @@ const stmt = {
     ON CONFLICT(chain, account) DO UPDATE SET
       nonce_at_check=@nonce, nonce_checked_at=@ts
   `),
+  // M4 纸面引擎
+  paperPositionByKeyGrp: db.prepare(`SELECT * FROM paper_positions WHERE key=? AND grp=?`),
+  paperPositionsByKey: db.prepare(`SELECT * FROM paper_positions WHERE key=?`),
+  paperActivePositions: db.prepare(`SELECT * FROM paper_positions WHERE status IN ('open','deferred')`),
+  paperInsertPosition: db.prepare(`
+    INSERT OR IGNORE INTO paper_positions
+      (key, chain, grp, status, signal_ts, open_ts, entry_price_usd, entry_mcap_usd, notional_usd, roundtrip_cost_pct, horizon_end_ts, defer_until_ts, peak_price_usd, trough_price_usd, last_price_usd, last_mcap_usd, last_mark_ts, skip_reason)
+    VALUES (@key, @chain, @grp, @status, @signal_ts, @open_ts, @entry_price_usd, @entry_mcap_usd, @notional_usd, @roundtrip_cost_pct, @horizon_end_ts, @defer_until_ts, @peak_price_usd, @trough_price_usd, @last_price_usd, @last_mcap_usd, @last_mark_ts, @skip_reason)
+  `),
+  paperOpenDeferred: db.prepare(`
+    UPDATE paper_positions SET status='open', open_ts=@open_ts, entry_price_usd=@entry_price_usd, entry_mcap_usd=@entry_mcap_usd,
+      roundtrip_cost_pct=@roundtrip_cost_pct, horizon_end_ts=@horizon_end_ts,
+      peak_price_usd=@peak_price_usd, trough_price_usd=@trough_price_usd,
+      last_price_usd=@last_price_usd, last_mcap_usd=@last_mcap_usd, last_mark_ts=@last_mark_ts
+    WHERE id=@id AND status='deferred'
+  `),
+  paperMarkSkipped: db.prepare(`UPDATE paper_positions SET status='skipped', skip_reason=@skip_reason WHERE id=@id AND status='deferred'`),
+  paperExpireDeferred: db.prepare(`UPDATE paper_positions SET status='deferred_expired', close_ts=@now WHERE id=@id AND status='deferred'`),
+  paperUpdateMark: db.prepare(`
+    UPDATE paper_positions SET last_price_usd=@last_price_usd, last_mcap_usd=@last_mcap_usd, last_mark_ts=@last_mark_ts,
+      peak_price_usd=@peak_price_usd, trough_price_usd=@trough_price_usd WHERE id=@id
+  `),
+  paperClosePosition: db.prepare(`
+    UPDATE paper_positions SET status='closed', close_ts=@close_ts, close_price_usd=@close_price_usd, close_mcap_usd=@close_mcap_usd,
+      close_reason=@close_reason, pnl_usd=@pnl_usd, pnl_pct=@pnl_pct,
+      peak_price_usd=@peak_price_usd, trough_price_usd=@trough_price_usd WHERE id=@id AND status='open'
+  `),
+  paperInsertMark: db.prepare(`INSERT INTO paper_marks (position_id, ts, price_usd, mcap_usd, pnl_usd, pnl_pct) VALUES (@position_id, @ts, @price_usd, @mcap_usd, @pnl_usd, @pnl_pct)`),
+  paperStatusCounts: db.prepare(`SELECT grp, status, COUNT(*) AS n FROM paper_positions GROUP BY grp, status`),
+  paperClosedPnls: db.prepare(`SELECT pnl_pct, (close_ts - open_ts) AS hold_ms FROM paper_positions WHERE grp=? AND status='closed'`),
+  paperDeleteOldMarks: db.prepare(`DELETE FROM paper_marks WHERE ts < ?`),
 };
 
 // buyerProfilesForAccounts 的 IN(...) prepared statement 按占位符个数缓存(节点 sqlite 需固定 SQL)。
@@ -613,4 +692,26 @@ export const store = {
     if (liq > cur) stmt.setV4MaxLiquidity.run(liq.toString(), chain, id);
   },
   v4Pools(chain) { return chain ? stmt.v4PoolsByChain.all(chain) : stmt.allV4Pools.all(); },
+  // —— M4 纸面引擎 ——
+  paperPosition(key, grp) { return stmt.paperPositionByKeyGrp.get(key, grp); },
+  paperPositionsForKey(key) { return stmt.paperPositionsByKey.all(key); },
+  paperActivePositions() { return stmt.paperActivePositions.all(); },
+  // 开/延期/跳过一仓：INSERT OR IGNORE + UNIQUE(key,grp) 保证幂等(并发/重放不会重复开仓)。返回 true=真正新增。
+  paperInsertPosition(p) {
+    return stmt.paperInsertPosition.run({
+      open_ts: null, entry_price_usd: null, entry_mcap_usd: null, roundtrip_cost_pct: null,
+      horizon_end_ts: null, defer_until_ts: null, peak_price_usd: null, trough_price_usd: null,
+      last_price_usd: null, last_mcap_usd: null, last_mark_ts: null, skip_reason: null,
+      ...p,
+    }).changes > 0;
+  },
+  paperOpenDeferred(id, f) { return stmt.paperOpenDeferred.run({ id, ...f }).changes > 0; },
+  paperMarkSkipped(id, skip_reason) { stmt.paperMarkSkipped.run({ id, skip_reason }); },
+  paperExpireDeferred(id, now) { stmt.paperExpireDeferred.run({ id, now }); },
+  paperUpdateMark(id, f) { stmt.paperUpdateMark.run({ id, ...f }); },
+  paperClose(id, f) { return stmt.paperClosePosition.run({ id, ...f }).changes > 0; },
+  paperAddMark(m) { stmt.paperInsertMark.run(m); },
+  paperStatusCounts() { return stmt.paperStatusCounts.all(); },
+  paperClosedPnls(grp) { return stmt.paperClosedPnls.all(grp); },
+  purgePaperMarks(beforeMs) { return stmt.paperDeleteOldMarks.run(beforeMs).changes; },
 };

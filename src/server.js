@@ -11,6 +11,7 @@ import { rpcCapabilities } from './rpccap.js';
 import { rpcRouting } from './chain.js';
 import { child } from './logger.js';
 import { buyerRatios } from './buyer.js';
+import { paperStats } from './paper.js';
 import { PRICE_STALE_MS, PRICE_UNKNOWN_MS } from './price.js';
 
 const log = child('server');
@@ -151,6 +152,10 @@ export async function startServer() {
     const chain = req.query?.chain || null; // 方案0-5：分链统计(空=全量)，前端据 seen 数显示「本链 N 个候选等待准入」
     return store.stats(since, chain);
   });
+
+  // M4 纸面引擎统计：各分组(baseline_seen/tier_t1/tier_t2/entry_pass)的开/平/延期/跳过计数
+  // + 已平仓的均值/中位/胜率/平均持有时长，评估各信号档的模拟回报。
+  app.get('/api/paper', async () => paperStats());
 
   // SSE 实时推送
   app.get('/api/stream', (req, reply) => {

@@ -1435,3 +1435,66 @@ test('trades uq_trades_evt：同事件二次入库被忽略、异 logIndex 入�
   assert.equal(count(), 4, 'NULL 键两行均入库');
   mem.close();
 });
+
+// —— M4 纸面引擎：纯函数 ——
+import { roundtripCostPct, openGate, markPnl, groupsFor } from '../src/paper.js';
+
+test('roundtripCostPct：费率未知→基础成本；已知→base+2×fee；≥上限→null(skip)', () => {
+  const c = { baseCostPct: 2, maxPoolFeePct: 10 };
+  assert.equal(roundtripCostPct(null, c), 2, '费率未知 → 仅基础 2%');
+  assert.equal(roundtripCostPct(1, c), 4, 'Arc 1% 池 → 2 + 2×1 = 4%');
+  assert.equal(roundtripCostPct(0.5, c), 3, '0.5% 池 → 3%');
+  assert.equal(roundtripCostPct(10, c), null, '≥上限 → null(skip)');
+  assert.equal(roundtripCostPct(90.1, c), null, '反狙击高费率 → skip');
+});
+
+test('openGate：价格 ok + 深度达标 + 有流动性 + 价>0 全满足才放行', () => {
+  const c = { minDepthUsd: 500 };
+  const base = { priceState: 'ok', depthUsd: 500, noActiveLiquidity: false, priceUsd: 0.01 };
+  assert.equal(openGate(base, c), true, '全满足 → 开仓');
+  assert.equal(openGate({ ...base, priceState: 'stale' }, c), false, '价格非 ok → 拒');
+  assert.equal(openGate({ ...base, depthUsd: 499 }, c), false, '深度不足 → 拒');
+  assert.equal(openGate({ ...base, noActiveLiquidity: true }, c), false, '当前价位无流动性 → 拒');
+  assert.equal(openGate({ ...base, priceUsd: 0 }, c), false, '价格 0 → 拒');
+});
+
+test('markPnl：往返成本内含于每次标记(此刻退出净值)', () => {
+  const r = markPnl(1, 2, 100, 4); // 翻倍、往返 4%
+  assert.equal(r.grossUsd, 200);
+  assert.ok(Math.abs(r.netUsd - 192) < 1e-9);
+  assert.ok(Math.abs(r.pnlUsd - 92) < 1e-9);
+  assert.ok(Math.abs(r.pnlPct - 92) < 1e-9);
+  const flat = markPnl(1, 1, 100, 2); // 价平、往返 2% → 净亏 2
+  assert.ok(Math.abs(flat.pnlUsd + 2) < 1e-9, '价平也要扣往返成本');
+});
+
+test('groupsFor：baseline 恒含；tier 累进；entry.ok 追加(非互斥)', () => {
+  assert.deepEqual(groupsFor({ tier: 'T0' }, {}), ['baseline_seen']);
+  assert.deepEqual(groupsFor({ tier: 'T1' }, {}), ['baseline_seen', 'tier_t1']);
+  assert.deepEqual(groupsFor({ tier: 'T2' }, {}), ['baseline_seen', 'tier_t1', 'tier_t2']);
+  assert.deepEqual(
+    groupsFor({ tier: 'T2' }, { entry: { ok: true } }),
+    ['baseline_seen', 'tier_t1', 'tier_t2', 'entry_pass'],
+  );
+  assert.deepEqual(groupsFor({ tier: 'T0' }, { entry: { ok: true } }), ['baseline_seen', 'entry_pass']);
+});
+
+// —— M4：paper_positions UNIQUE(key,grp) 幂等(每组每币至多一仓) ——
+// 独立内存库复刻关键 DDL，验证 INSERT OR IGNORE + UNIQUE 兜底(并发/重放不重复开仓)。
+test('paper_positions UNIQUE(key,grp)：同组二次开仓被忽略、异组各自开仓', () => {
+  const mem = new _DBSync(':memory:');
+  mem.exec(`CREATE TABLE paper_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL, chain TEXT NOT NULL, grp TEXT NOT NULL, status TEXT NOT NULL,
+    signal_ts INTEGER NOT NULL, UNIQUE(key, grp)
+  )`);
+  const ins = mem.prepare('INSERT OR IGNORE INTO paper_positions (key, chain, grp, status, signal_ts) VALUES (?, ?, ?, ?, ?)');
+  const count = () => mem.prepare('SELECT COUNT(*) n FROM paper_positions').get().n;
+
+  assert.equal(ins.run('bsc:0x1', 'bsc', 'baseline_seen', 'open', 1).changes, 1, '首次开仓');
+  assert.equal(ins.run('bsc:0x1', 'bsc', 'baseline_seen', 'open', 2).changes, 0, '同组二次被忽略');
+  assert.equal(ins.run('bsc:0x1', 'bsc', 'tier_t1', 'open', 3).changes, 1, '异组独立开仓');
+  assert.equal(ins.run('bsc:0x2', 'bsc', 'baseline_seen', 'open', 4).changes, 1, '异币独立开仓');
+  assert.equal(count(), 3);
+  mem.close();
+});

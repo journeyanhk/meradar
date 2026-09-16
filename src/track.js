@@ -11,6 +11,7 @@ import { config, chainConfig, entryFilterFor } from './config.js';
 import { httpClient } from './chain.js';
 import { bus, Events } from './bus.js';
 import * as momentum from './momentum.js';
+import * as paper from './paper.js';
 import { forgetPoolState, getPoolState } from './poolstate.js';
 import { classifyTokenBuyers } from './buyer.js';
 import { child } from './logger.js';
@@ -286,6 +287,8 @@ export async function pollCandidate(chain, cand) {
     depthUsd,
     depthKind,
     poolFeePct,
+    // 纸面开仓门槛用：当前价位是否无流动性(v4 集中池 rug/单边判定，与撤池区分)。
+    noActiveLiquidity: !!(softFlags?.noActiveLiquidity),
     offersPct,
     curveProgressPct,
     priceUsd: px.priceUsd,
@@ -378,7 +381,10 @@ export async function pollCandidate(chain, cand) {
   metrics.entry = entry;
 
   await maybeAlert(chain, fresh, metrics);
-  bus.emit(Events.UPDATE, { ...store.get(cand.key) });
+  // M4 纸面引擎：用本轮最终行(含 maybeAlert 落库的最新 tier) + metrics 开/标/平各分组模拟仓(只读)。
+  const finalRow = store.get(cand.key);
+  paper.onPoll(chain, finalRow, metrics);
+  bus.emit(Events.UPDATE, { ...finalRow });
 }
 
 // 并发受限执行
