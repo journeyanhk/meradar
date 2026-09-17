@@ -268,6 +268,11 @@ ensureColumns('candidates', [
   // M3-1 priceOf：价格来源与最后成功更新时刻。读失败时保旧价+按 price_updated_at 判 stale，重启不丢；
   // 绝不把市值写 0(4FOUR/币安镇长两次「归零」根因)。source ∈ curve|amm-v2|amm-v3|amm-v4|external。
   ['price_source', 'price_source TEXT'],
+  // snapshots 去重(写放大治理)：记上一次真正落 snapshots 行时的时刻/价/深度，供 shouldWriteSnapshot 判定，
+  // 避免每轮为 flat 币重复写行。不落 snapshots 时这三列也不更新(=「上次落行」语义，超时自然触发心跳)。
+  ['last_snapshot_ts', 'last_snapshot_ts INTEGER'],
+  ['last_snapshot_price', 'last_snapshot_price REAL'],
+  ['last_snapshot_depth', 'last_snapshot_depth REAL'],
   ['price_updated_at', 'price_updated_at INTEGER'],
   // 价格状态：ok|stale|unknown|withdrawn|implausible。implausible=合理性钳位命中(报价币单位错误)，
   // 卡片显示「数据异常·已隐藏」而非 $0，与真归零/未定价区分。
@@ -356,6 +361,8 @@ const stmt = {
   setStatus: db.prepare(`UPDATE candidates SET status=@status, reject_reason=@reject_reason, updated_at=@updated_at WHERE key=@key`),
   setSafety: db.prepare(`UPDATE candidates SET safety_json=@safety_json, updated_at=@updated_at WHERE key=@key`),
   insertSnapshot: db.prepare(`INSERT INTO snapshots (key, ts, liquidity_usd, price_usd, market_cap_usd, holders, unique_buyers) VALUES (@key, @ts, @liquidity_usd, @price_usd, @market_cap_usd, @holders, @unique_buyers)`),
+  // 去重游标更新(不动 updated_at，避免污染归档/排序的 last-active 判定)。仅在真正落 snapshots 行时调用。
+  setSnapshotMeta: db.prepare(`UPDATE candidates SET last_snapshot_ts=@ts, last_snapshot_price=@price, last_snapshot_depth=@depth WHERE key=@key`),
   getSnapshots: db.prepare(`SELECT ts, liquidity_usd, price_usd, market_cap_usd, holders, unique_buyers FROM snapshots WHERE key=? ORDER BY ts ASC LIMIT 500`),
   deleteOldSnapshots: db.prepare(`DELETE FROM snapshots WHERE ts < ?`),
   insertAlert: db.prepare(`INSERT INTO alerts (key, chain, tier, ts, reason, sent_telegram, sent_serverchan) VALUES (@key, @chain, @tier, @ts, @reason, @sent_telegram, @sent_serverchan)`),
@@ -598,6 +605,7 @@ export const store = {
   setStatus(key, status, reject_reason = null) { stmt.setStatus.run({ key, status, reject_reason, updated_at: Date.now() }); },
   setSafety(key, safety) { stmt.setSafety.run({ key, safety_json: JSON.stringify(safety), updated_at: Date.now() }); },
   addSnapshot(s) { stmt.insertSnapshot.run({ ts: Date.now(), ...s }); },
+  setSnapshotMeta(key, ts, price, depth) { stmt.setSnapshotMeta.run({ key, ts, price, depth }); },
   snapshots(key) { return stmt.getSnapshots.all(key); },
   purgeSnapshots(beforeMs) { return stmt.deleteOldSnapshots.run(beforeMs).changes; },
   addAlert(a) { stmt.insertAlert.run(a); },
@@ -636,6 +644,16 @@ export const store = {
   walCheckpoint() { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); },
   incrementalVacuum(pages = 4000) { db.exec(`PRAGMA incremental_vacuum(${pages})`); },
   analyze() { db.exec('ANALYZE'); },
+  // 诊断(scripts/db-maintain.mjs --stats)：各表行数 + 空闲页可回收量。
+  rawCounts() {
+    const t = ['candidates', 'trades', 'buyers', 'v4_pools', 'pool_creators', 'paper_marks', 'snapshots', 'buyer_profiles'];
+    return t.map((name) => ({ table: name, rows: db.prepare(`SELECT COUNT(*) AS n FROM ${name}`).get().n }));
+  },
+  freelistInfo() {
+    const free = db.prepare('PRAGMA freelist_count').get().freelist_count;
+    const ps = db.prepare('PRAGMA page_size').get().page_size;
+    return { free_pages: free, page_size: ps, reclaimable_mb: Math.round((free * ps / 1048576) * 10) / 10 };
+  },
   tradeCount() { return stmt.countTrades.get().n; },
   tradeFlow(key, now = Date.now()) {
     const r = stmt.tradeFlow.get({ key, t30: now - 30 * 60_000, t1h: now - 3600_000, t10: now - 10 * 60_000 });

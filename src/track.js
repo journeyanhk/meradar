@@ -6,6 +6,7 @@ import { discoverPool, graduatedByCurve } from './pool.js';
 import { narrativeHit, copycatCount } from './narrative.js';
 import { maybeAlert, evaluateTier } from './alert.js';
 import { evaluateEntry } from './entry.js';
+import { shouldWriteSnapshot } from './snapshot.js';
 import { store } from './db.js';
 import { config, chainConfig, entryFilterFor } from './config.js';
 import { httpClient } from './chain.js';
@@ -344,15 +345,6 @@ export async function pollCandidate(chain, cand) {
     price_updated_at: metrics.priceUpdatedAt,
     price_state: metrics.priceState,
   });
-  store.addSnapshot({
-    key: cand.key,
-    liquidity_usd: metrics.liquidityUsd,
-    price_usd: metrics.priceUsd,
-    market_cap_usd: metrics.marketCapUsd,
-    holders: metrics.holders,
-    unique_buyers: metrics.uniqueBuyers,
-  });
-
   const fresh = store.get(cand.key);
   // 强提示前保新鲜：若本轮 rawTier 已达 T2/T3 但毕业币往返结果过期(>10min)，重跑一次往返再定级，
   // 避免拿着旧快照发强提示。曲线期(模板)无此问题，模板哈希永久有效。
@@ -383,6 +375,34 @@ export async function pollCandidate(chain, cand) {
   await maybeAlert(chain, fresh, metrics);
   // M4 纸面引擎：用本轮最终行(含 maybeAlert 落库的最新 tier) + metrics 开/标/平各分组模拟仓(只读)。
   const finalRow = store.get(cand.key);
+  // snapshots 去重(写放大治理)：按最终 tier + 变化/心跳/事件判定是否落行。事件=tier 变化/entry 变化/撤池。
+  // 用 prev(轮询开始的行)的 last_snapshot_* 作去重游标；prevBuyers 为上轮买家数。
+  const snapEvent =
+    (finalRow?.tier ?? cand.tier) !== (cand.tier) ||       // 本轮升/降级
+    (fresh?.entry_json ?? null) !== entryJson ||           // 可试仓状态翻转
+    metrics.priceState === 'withdrawn';                    // 撤池
+  const writeSnap = shouldWriteSnapshot({
+    tier: finalRow?.tier ?? cand.tier,
+    now,
+    last: { ts: prev?.last_snapshot_ts ?? 0, price: prev?.last_snapshot_price ?? 0, depth: prev?.last_snapshot_depth ?? 0 },
+    price: metrics.priceUsd,
+    depth: metrics.depthUsd,
+    buyers: metrics.uniqueBuyers,
+    prevBuyers,
+    event: snapEvent,
+    cfg: config.snapshots,
+  });
+  if (writeSnap) {
+    store.addSnapshot({
+      key: cand.key,
+      liquidity_usd: metrics.liquidityUsd,
+      price_usd: metrics.priceUsd,
+      market_cap_usd: metrics.marketCapUsd,
+      holders: metrics.holders,
+      unique_buyers: metrics.uniqueBuyers,
+    });
+    store.setSnapshotMeta(cand.key, now, metrics.priceUsd, metrics.depthUsd);
+  }
   paper.onPoll(chain, finalRow, metrics);
   bus.emit(Events.UPDATE, { ...finalRow });
 }
@@ -416,7 +436,9 @@ function refreshPeaks(sinceMs) {
 let running = false;
 export function startTracker() {
   const intervalMs = (config.tracking.pollIntervalSec || 45) * 1000;
-  const noMomentumMs = (config.tracking.archiveIfNoMomentumMin || 180) * 60 * 1000;
+  const noMomentumMs = (config.tracking.archiveIfNoMomentumMin || 120) * 60 * 1000;
+  // T2+(曾达标热门)给更长宽限：允许其在无成交后多观察一段(默认 6h)再归档。
+  const hotGraceMs = (config.tracking.archiveHotGraceMin || 360) * 60 * 1000;
   const concurrency = config.tracking.concurrency || 6;
 
   async function tick() {
@@ -435,7 +457,12 @@ export function startTracker() {
           momentum.lastTradeTs(cand.address) || 0,
           cand.updated_at || 0,
         );
-        if (cand.tier === 'T0' && Date.now() - lastTradeTs > noMomentumMs) {
+        // 归档基数治理：所有 tier 无成交超窗都归档(此前仅 T0，导致死掉的 T1+ 永久占用轮询/快照)。
+        // T2/T3 曾达标热门给 hotGraceMs(6h)缓冲；其余用 noMomentumMs(2h)。归档后不再轮询/写快照，
+        // 再现买入会被 engine 复活为 active(见 engine.js)，不会永久丢失。
+        const hot = cand.tier === 'T2' || cand.tier === 'T3';
+        const graceMs = hot ? hotGraceMs : noMomentumMs;
+        if (Date.now() - lastTradeTs > graceMs) {
           store.setStatus(cand.key, 'archived', '无动量归档');
           momentum.forget(cand.address);
           if (cand.pool) { forgetPoolState(cand.chain, cand.pool); bus.emit(Events.POOLS_CHANGED, { chain: cand.chain }); } // 归档已毕业币需重建成交订阅 + 清池状态

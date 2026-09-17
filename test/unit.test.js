@@ -1553,3 +1553,50 @@ test('drain：恰好整批倍数时会多跑一次确认到空', () => {
   assert.equal(total, 20);
   assert.equal(calls, 3, '整批倍数需一次空确认');
 });
+
+// —— snapshots 去重：shouldWriteSnapshot —— //
+import { shouldWriteSnapshot } from '../src/snapshot.js';
+
+test('shouldWriteSnapshot：首行/事件即时落行', () => {
+  const base = { tier: 'T1', now: 1_000_000, price: 1, depth: 1000, buyers: 5, prevBuyers: 5 };
+  assert.equal(shouldWriteSnapshot({ ...base, last: null }), true, '首行(无 last)必落');
+  const last = { ts: 999_999, price: 1, depth: 1000 };
+  assert.equal(shouldWriteSnapshot({ ...base, last, event: true }), true, '事件绕过最小间隔即时落行');
+});
+
+test('shouldWriteSnapshot：未到最小间隔不落(无事件)', () => {
+  const last = { ts: 1_000_000, price: 1, depth: 1000 };
+  // T1+ 60s：50s 后、且有大变化也不落(未到间隔)
+  assert.equal(shouldWriteSnapshot({ tier: 'T1', now: 1_050_000, last, price: 2, depth: 3000, buyers: 9, prevBuyers: 5 }), false);
+  // T0 120s：90s 后不落
+  assert.equal(shouldWriteSnapshot({ tier: 'T0', now: 1_090_000, last, price: 2, depth: 3000, buyers: 9, prevBuyers: 5 }), false);
+});
+
+test('shouldWriteSnapshot：过间隔后按变化阈值决定', () => {
+  const last = { ts: 1_000_000, price: 1, depth: 1000 };
+  const at = (dt) => 1_000_000 + dt;
+  // 70s(>60s)、价 +0.5%(<1%)、深 +1%(<2%)、买家不变 → 不落
+  assert.equal(shouldWriteSnapshot({ tier: 'T1', now: at(70_000), last, price: 1.005, depth: 1010, buyers: 5, prevBuyers: 5 }), false);
+  // 价 +1.5%(≥1%) → 落
+  assert.equal(shouldWriteSnapshot({ tier: 'T1', now: at(70_000), last, price: 1.015, depth: 1000, buyers: 5, prevBuyers: 5 }), true);
+  // 深 +3%(≥2%) → 落
+  assert.equal(shouldWriteSnapshot({ tier: 'T1', now: at(70_000), last, price: 1, depth: 1030, buyers: 5, prevBuyers: 5 }), true);
+  // 买家数变化 → 落
+  assert.equal(shouldWriteSnapshot({ tier: 'T1', now: at(70_000), last, price: 1, depth: 1000, buyers: 6, prevBuyers: 5 }), true);
+});
+
+test('shouldWriteSnapshot：无变化仅到心跳才落(T1+ 5min、T0 15min)', () => {
+  const last = { ts: 1_000_000, price: 1, depth: 1000 };
+  const flat = { last, price: 1, depth: 1000, buyers: 5, prevBuyers: 5 };
+  // T1+：4min 无变化不落，5min 落
+  assert.equal(shouldWriteSnapshot({ ...flat, tier: 'T1', now: 1_000_000 + 4 * 60_000 }), false);
+  assert.equal(shouldWriteSnapshot({ ...flat, tier: 'T1', now: 1_000_000 + 5 * 60_000 }), true);
+  // T0：10min 不落，15min 落
+  assert.equal(shouldWriteSnapshot({ ...flat, tier: 'T0', now: 1_000_000 + 10 * 60_000 }), false);
+  assert.equal(shouldWriteSnapshot({ ...flat, tier: 'T0', now: 1_000_000 + 15 * 60_000 }), true);
+});
+
+test('shouldWriteSnapshot：上次价为 0、这次有值视为大变化', () => {
+  const last = { ts: 1_000_000, price: 0, depth: 0 };
+  assert.equal(shouldWriteSnapshot({ tier: 'T1', now: 1_070_000, last, price: 0.01, depth: 500, buyers: 3, prevBuyers: 3 }), true);
+});

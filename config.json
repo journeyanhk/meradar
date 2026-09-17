@@ -3,8 +3,18 @@
     "pollIntervalSec": 45,
     "maxActiveCandidates": 400,
     "concurrency": 6,
-    "archiveIfNoMomentumMin": 180,
+    "archiveIfNoMomentumMin": 120,
+    "archiveHotGraceMin": 360,
     "snapshotRetentionDays": 3
+  },
+  "snapshots": {
+    "minIntervalSec": 60,
+    "minIntervalT0Sec": 120,
+    "dedupPricePct": 1,
+    "dedupDepthPct": 2,
+    "heartbeatSec": 300,
+    "heartbeatT0Sec": 900,
+    "note": "snapshots 去重(写放大治理)：每轮按 tier + 变化/心跳/事件判定是否落行。价格变动<dedupPricePct% 且深度<dedupDepthPct% 且买家数不变时不落行；T1+ 最小间隔 minIntervalSec、心跳 heartbeatSec，T0 用 T0 变体(更稀疏)；tier 变化/entry 翻转/撤池即时落行。见 src/snapshot.js。"
   },
   "maintenance": {
     "enabled": true,
