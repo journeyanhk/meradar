@@ -1468,13 +1468,15 @@ test('markPnl：往返成本内含于每次标记(此刻退出净值)', () => {
   assert.ok(Math.abs(flat.pnlUsd + 2) < 1e-9, '价平也要扣往返成本');
 });
 
-test('groupsFor：baseline 恒含；tier 累进；entry.ok 追加(非互斥)', () => {
+test('groupsFor：首次到达语义——tier_t1 仅当前恰 T1、tier_t2 为 T2+(不再重叠)', () => {
   assert.deepEqual(groupsFor({ tier: 'T0' }, {}), ['baseline_seen']);
   assert.deepEqual(groupsFor({ tier: 'T1' }, {}), ['baseline_seen', 'tier_t1']);
-  assert.deepEqual(groupsFor({ tier: 'T2' }, {}), ['baseline_seen', 'tier_t1', 'tier_t2']);
+  // 核心修复：T2 币只进 tier_t2，不再同时塞进 tier_t1(否则两组同价重叠)
+  assert.deepEqual(groupsFor({ tier: 'T2' }, {}), ['baseline_seen', 'tier_t2']);
+  assert.deepEqual(groupsFor({ tier: 'T3' }, {}), ['baseline_seen', 'tier_t2']);
   assert.deepEqual(
     groupsFor({ tier: 'T2' }, { entry: { ok: true } }),
-    ['baseline_seen', 'tier_t1', 'tier_t2', 'entry_pass'],
+    ['baseline_seen', 'tier_t2', 'entry_pass'],
   );
   assert.deepEqual(groupsFor({ tier: 'T0' }, { entry: { ok: true } }), ['baseline_seen', 'entry_pass']);
 });

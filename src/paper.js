@@ -50,10 +50,12 @@ export function markPnl(entryPrice, markPrice, notionalUsd, rtCostPct) {
 }
 
 // 该候选本轮所属分组(非互斥)。baseline_seen 恒含(对照组=所有被轮询的活跃候选)。
+// tier_t1/tier_t2 用「首次到达该档」语义：tier_t1 仅当前恰为 T1(入场即 T1)，tier_t2 为 T2+。
+// 若首次观察即 T2，则只开 tier_t2——否则同一批币在两组同价各开一仓(实测 T1≈T2)，对比无意义。
 export function groupsFor(row, metrics) {
   const g = ['baseline_seen'];
   const rank = RANK[row.tier] ?? 0;
-  if (rank >= 1) g.push('tier_t1');
+  if (rank === 1) g.push('tier_t1');
   if (rank >= 2) g.push('tier_t2');
   if (metrics.entry?.ok) g.push('entry_pass');
   return g;
@@ -63,45 +65,37 @@ export function groupsFor(row, metrics) {
 
 function tryOpen(chain, row, metrics, grp, now) {
   const rt = roundtripCostPct(metrics.poolFeePct, cfg);
-  if (rt == null) {
-    // 费率≥上限 → 记录 skipped(不开仓)，保留信号点供统计「因高费率放弃」占比。
-    store.paperInsertPosition({
-      key: row.key, chain, grp, status: 'skipped', signal_ts: now,
-      notional_usd: cfg.notionalUsd ?? 100,
-      skip_reason: `pool_fee_${(metrics.poolFeePct ?? 0).toFixed(1)}pct_ge_${cfg.maxPoolFeePct ?? 10}`,
-    });
-    return;
-  }
-  if (openGate(metrics, cfg)) {
-    const price = metrics.priceUsd;
-    const opened = store.paperInsertPosition({
-      key: row.key, chain, grp, status: 'open', signal_ts: now, open_ts: now,
-      entry_price_usd: price, entry_mcap_usd: metrics.marketCapUsd ?? null,
-      notional_usd: cfg.notionalUsd ?? 100, roundtrip_cost_pct: rt,
-      horizon_end_ts: now + (cfg.horizonHours ?? 24) * HOUR,
-      peak_price_usd: price, trough_price_usd: price,
-      last_price_usd: price, last_mcap_usd: metrics.marketCapUsd ?? null, last_mark_ts: now,
-    });
-    if (opened) {
-      // 开仓即打 t0 标记(pnl≈-往返成本)。开仓门槛已保证 price_state==='ok'。
-      const { pnlUsd, pnlPct } = markPnl(price, price, cfg.notionalUsd ?? 100, rt);
-      const pos = store.paperPosition(row.key, grp);
-      if (pos) store.paperAddMark({ position_id: pos.id, ts: now, price_usd: price, mcap_usd: metrics.marketCapUsd ?? null, pnl_usd: pnlUsd, pnl_pct: pnlPct, price_state: 'ok' });
-    }
-  } else {
-    // 门槛未过 → 延期(deferred)。到期仍不可开 → sweep 置 deferred_expired。
+  if (rt == null || !openGate(metrics, cfg)) {
+    // 费率≥上限(实测几乎全是 Pons 发射期反狙击费 79%–100%，会随成交衰减) 或 门槛未过 → 延期重试，
+    // 不再终态 skip。到期(deferMinutes)仍不可开 → sweep 置 deferred_expired。tryReopenDeferred 用复评时费率。
     store.paperInsertPosition({
       key: row.key, chain, grp, status: 'deferred', signal_ts: now,
       notional_usd: cfg.notionalUsd ?? 100,
       defer_until_ts: now + (cfg.deferMinutes ?? 30) * 60_000,
     });
+    return;
+  }
+  const price = metrics.priceUsd;
+  const opened = store.paperInsertPosition({
+    key: row.key, chain, grp, status: 'open', signal_ts: now, open_ts: now,
+    entry_price_usd: price, entry_mcap_usd: metrics.marketCapUsd ?? null,
+    notional_usd: cfg.notionalUsd ?? 100, roundtrip_cost_pct: rt,
+    horizon_end_ts: now + (cfg.horizonHours ?? 24) * HOUR,
+    peak_price_usd: price, trough_price_usd: price,
+    last_price_usd: price, last_mcap_usd: metrics.marketCapUsd ?? null, last_mark_ts: now,
+  });
+  if (opened) {
+    // 开仓即打 t0 标记(pnl≈-往返成本)。开仓门槛已保证 price_state==='ok'。
+    const { pnlUsd, pnlPct } = markPnl(price, price, cfg.notionalUsd ?? 100, rt);
+    const pos = store.paperPosition(row.key, grp);
+    if (pos) store.paperAddMark({ position_id: pos.id, ts: now, price_usd: price, mcap_usd: metrics.marketCapUsd ?? null, pnl_usd: pnlUsd, pnl_pct: pnlPct, price_state: 'ok' });
   }
 }
 
 function tryReopenDeferred(pos, metrics, now) {
   const rt = roundtripCostPct(metrics.poolFeePct, cfg);
-  if (rt == null) { store.paperMarkSkipped(pos.id, `pool_fee_${(metrics.poolFeePct ?? 0).toFixed(1)}pct_ge_${cfg.maxPoolFeePct ?? 10}`); return; }
-  if (!openGate(metrics, cfg)) return; // 仍不可开 → 继续等，sweep 处理到期
+  if (rt == null) return;              // 费率仍≥上限(反狙击费未衰减) → 继续等，sweep 到期置 deferred_expired
+  if (!openGate(metrics, cfg)) return; // 仍不可开 → 继续等
   const price = metrics.priceUsd;
   const ok = store.paperOpenDeferred(pos.id, {
     open_ts: now, entry_price_usd: price, entry_mcap_usd: metrics.marketCapUsd ?? null,
