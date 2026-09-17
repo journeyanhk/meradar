@@ -82,10 +82,12 @@ async function main() {
     if (removed) logger.debug({ removed }, '清理过期成交记录');
   }, 3600_000);
 
-  // 纸面标记清理：保留 30 天(持仓 horizon 24h + 复盘窗)，每小时清一次。仅清 marks，仓位表长期保留供统计。
+  // 纸面标记清理：已平仓仓位的 marks 保留 marksRetentionDays 天(默认 7)，每小时清一次。
+  // 仅删已平仓的明细行；仓位表(含峰谷/平仓价/pnl)永久保留供统计。open/deferred 的 marks 绝不删。
+  const paperRetainMs = (config.paper?.marksRetentionDays ?? 7) * 24 * 3600 * 1000;
   setInterval(() => {
-    const removed = store.purgePaperMarks(Date.now() - 30 * 24 * 3600 * 1000);
-    if (removed) logger.debug({ removed }, '清理过期纸面标记');
+    const removed = store.purgePaperMarks(Date.now() - paperRetainMs);
+    if (removed) logger.debug({ removed }, '清理已平仓过期纸面标记');
   }, 3600_000);
 
   // seen 清理：登记超 N 小时仍无动量升级的候选直接删除（本就是噪声），并释放内存动量状态。

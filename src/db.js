@@ -220,6 +220,7 @@ CREATE INDEX IF NOT EXISTS idx_paper_pos_status ON paper_positions(status);
 CREATE INDEX IF NOT EXISTS idx_paper_pos_grp ON paper_positions(grp, status);
 
 -- 纸面标记序列：每次 mark(60s 循环 + 事件即时)落一行，供回报曲线/回撤复盘。position_id→paper_positions.id。
+-- price_state 记标记时的价格状态(ok/stale/unknown/withdrawn)，分析时可剔除非 ok 标记。
 CREATE TABLE IF NOT EXISTS paper_marks (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   position_id INTEGER NOT NULL,
@@ -227,7 +228,8 @@ CREATE TABLE IF NOT EXISTS paper_marks (
   price_usd   REAL,
   mcap_usd    REAL,
   pnl_usd     REAL,
-  pnl_pct     REAL
+  pnl_pct     REAL,
+  price_state TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_paper_marks_pos ON paper_marks(position_id, ts);
 `);
@@ -301,6 +303,10 @@ ensureColumns('trades', [
 ]);
 // 成交事件唯一索引：同一(链, txHash, logIndex)只允许一行。NULL 互不相等 → 历史 NULL 行不冲突，迁移不失败。
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS uq_trades_evt ON trades(chain, tx_hash, log_index)');
+// M4 纸面标记：老库补 price_state 列(标记时价格状态，分析剔除非 ok 标记)。
+ensureColumns('paper_marks', [
+  ['price_state', 'price_state TEXT'],
+]);
 
 const stmt = {
   upsertCandidate: db.prepare(`
@@ -493,15 +499,24 @@ const stmt = {
     UPDATE paper_positions SET last_price_usd=@last_price_usd, last_mcap_usd=@last_mcap_usd, last_mark_ts=@last_mark_ts,
       peak_price_usd=@peak_price_usd, trough_price_usd=@trough_price_usd WHERE id=@id
   `),
+  // 只更新峰谷/last(不动 last_mark_ts)：标记去重时用——记录价格轨迹但不落 marks 行。
+  paperUpdatePeak: db.prepare(`
+    UPDATE paper_positions SET last_price_usd=@last_price_usd, last_mcap_usd=@last_mcap_usd,
+      peak_price_usd=@peak_price_usd, trough_price_usd=@trough_price_usd WHERE id=@id
+  `),
   paperClosePosition: db.prepare(`
     UPDATE paper_positions SET status='closed', close_ts=@close_ts, close_price_usd=@close_price_usd, close_mcap_usd=@close_mcap_usd,
       close_reason=@close_reason, pnl_usd=@pnl_usd, pnl_pct=@pnl_pct,
       peak_price_usd=@peak_price_usd, trough_price_usd=@trough_price_usd WHERE id=@id AND status='open'
   `),
-  paperInsertMark: db.prepare(`INSERT INTO paper_marks (position_id, ts, price_usd, mcap_usd, pnl_usd, pnl_pct) VALUES (@position_id, @ts, @price_usd, @mcap_usd, @pnl_usd, @pnl_pct)`),
+  paperInsertMark: db.prepare(`INSERT INTO paper_marks (position_id, ts, price_usd, mcap_usd, pnl_usd, pnl_pct, price_state) VALUES (@position_id, @ts, @price_usd, @mcap_usd, @pnl_usd, @pnl_pct, @price_state)`),
   paperStatusCounts: db.prepare(`SELECT grp, status, COUNT(*) AS n FROM paper_positions GROUP BY grp, status`),
-  paperClosedPnls: db.prepare(`SELECT pnl_pct, (close_ts - open_ts) AS hold_ms FROM paper_positions WHERE grp=? AND status='closed'`),
-  paperDeleteOldMarks: db.prepare(`DELETE FROM paper_marks WHERE ts < ?`),
+  paperStatusCountsByChain: db.prepare(`SELECT grp, status, COUNT(*) AS n FROM paper_positions WHERE chain=? GROUP BY grp, status`),
+  // 已平仓明细(含峰谷/入场/平仓原因)：供 pnl 分位 + MFE/MAE/2× 命中 + rug 率统计。
+  paperClosedPnls: db.prepare(`SELECT pnl_pct, (close_ts - open_ts) AS hold_ms, entry_price_usd, peak_price_usd, trough_price_usd, close_reason FROM paper_positions WHERE grp=? AND status='closed'`),
+  paperClosedPnlsByChain: db.prepare(`SELECT pnl_pct, (close_ts - open_ts) AS hold_ms, entry_price_usd, peak_price_usd, trough_price_usd, close_reason FROM paper_positions WHERE grp=? AND chain=? AND status='closed'`),
+  // 已平仓>N 天的仓位其 marks 清理(仓位行永久保留，只删明细行控 DB 体积)。open/deferred 的 marks 绝不删。
+  paperDeleteClosedMarks: db.prepare(`DELETE FROM paper_marks WHERE position_id IN (SELECT id FROM paper_positions WHERE status='closed' AND close_ts < ?)`),
 };
 
 // buyerProfilesForAccounts 的 IN(...) prepared statement 按占位符个数缓存(节点 sqlite 需固定 SQL)。
@@ -709,9 +724,11 @@ export const store = {
   paperMarkSkipped(id, skip_reason) { stmt.paperMarkSkipped.run({ id, skip_reason }); },
   paperExpireDeferred(id, now) { stmt.paperExpireDeferred.run({ id, now }); },
   paperUpdateMark(id, f) { stmt.paperUpdateMark.run({ id, ...f }); },
+  paperUpdatePeak(id, f) { stmt.paperUpdatePeak.run({ id, ...f }); },
   paperClose(id, f) { return stmt.paperClosePosition.run({ id, ...f }).changes > 0; },
-  paperAddMark(m) { stmt.paperInsertMark.run(m); },
-  paperStatusCounts() { return stmt.paperStatusCounts.all(); },
-  paperClosedPnls(grp) { return stmt.paperClosedPnls.all(grp); },
-  purgePaperMarks(beforeMs) { return stmt.paperDeleteOldMarks.run(beforeMs).changes; },
+  paperAddMark(m) { stmt.paperInsertMark.run({ price_state: null, ...m }); },
+  paperStatusCounts(chain = null) { return chain ? stmt.paperStatusCountsByChain.all(chain) : stmt.paperStatusCounts.all(); },
+  paperClosedPnls(grp, chain = null) { return chain ? stmt.paperClosedPnlsByChain.all(grp, chain) : stmt.paperClosedPnls.all(grp); },
+  // 已平仓>beforeMs 的仓位其 marks 清理(仓位行永久保留)。
+  purgePaperMarks(beforeMs) { return stmt.paperDeleteClosedMarks.run(beforeMs).changes; },
 };

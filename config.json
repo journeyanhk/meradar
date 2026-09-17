@@ -17,9 +17,13 @@
     "horizonHours": 24,
     "minDepthUsd": 500,
     "deferMinutes": 30,
-    "markMinIntervalSec": 20,
+    "markMinIntervalSec": 60,
     "markLoopSec": 60,
-    "note": "M4 纸面引擎(只读模拟)：每个候选在信号点用名义 $100 模拟买入并追踪 24h 回报。分组 baseline_seen(所有活跃候选=对照)/tier_t1/tier_t2/entry_pass，非互斥，UNIQUE(key,grp)。往返成本=baseCostPct + 2×poolFeePct(费率未知按 2%，Arc 1% 池=4%，≥maxPoolFeePct 不开仓 skip)。开仓门槛 price_state=='ok' && depthUsd>=minDepthUsd && !noActiveLiquidity，否则延期 deferMinutes 后 deferred_expired。mark 每 markLoopSec 秒 + 事件即时(最小间隔 markMinIntervalSec)。纯读候选已存价格，不自持 RPC。"
+    "baselineSampleOneIn": 5,
+    "markDedupPct": 1,
+    "markDedupWindowSec": 300,
+    "marksRetentionDays": 7,
+    "note": "M4 纸面引擎(只读模拟)：每个候选在信号点用名义 $100 模拟买入并追踪 24h 回报。分组 baseline_seen(哈希抽样 1/baselineSampleOneIn=20% 对照)/tier_t1/tier_t2/entry_pass，非互斥，UNIQUE(key,grp)。往返成本=baseCostPct + 2×poolFeePct(费率未知按 2%，Arc 1% 池=4%，≥maxPoolFeePct 不开仓 skip)。开仓门槛 price_state=='ok' && depthUsd>=minDepthUsd && !noActiveLiquidity，否则延期 deferMinutes 后 deferred_expired。撤池(price_state=='withdrawn')立即以 0 平仓记 −100%(rug)。mark 每 markLoopSec 秒 + 事件即时(最小间隔 markMinIntervalSec；价格变动<markDedupPct% 且距上次落行<markDedupWindowSec 秒则只更新峰谷不落行)。已平仓仓位的 marks 保留 marksRetentionDays 天。纯读候选已存价格，不自持 RPC。"
   },
   "buyerGrading": {
     "farmMinTokens24h": 8,

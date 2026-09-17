@@ -154,8 +154,8 @@ export async function startServer() {
   });
 
   // M4 纸面引擎统计：各分组(baseline_seen/tier_t1/tier_t2/entry_pass)的开/平/延期/跳过计数
-  // + 已平仓的均值/中位/胜率/平均持有时长，评估各信号档的模拟回报。
-  app.get('/api/paper', async () => paperStats());
+  // + 已平仓的均值/中位/胜率/持有时长/rug 率/MFE/MAE/2× 命中。?chain= 分链(空=全量三链合计)。
+  app.get('/api/paper', async (req) => paperStats(req.query?.chain || null));
 
   // SSE 实时推送
   app.get('/api/stream', (req, reply) => {

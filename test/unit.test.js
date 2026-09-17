@@ -1498,3 +1498,27 @@ test('paper_positions UNIQUE(key,grp)：同组二次开仓被忽略、异组各�
   assert.equal(count(), 3);
   mem.close();
 });
+
+// —— M4 第一批：撤池记 −100% + baseline 哈希抽样 ——
+import { markPnl as _markPnl, inBaselineSample } from '../src/paper.js';
+
+test('撤池 −100%：markPnl(entry, 0) → 净值 0、pnl=-notional、pnlPct=-100', () => {
+  const r = _markPnl(0.05, 0, 100, 4); // 归零，往返 4%
+  assert.equal(r.grossUsd, 0);
+  assert.equal(r.netUsd, 0);
+  assert.equal(r.pnlUsd, -100);
+  assert.equal(r.pnlPct, -100);
+});
+
+test('inBaselineSample：确定性(同 key 恒定) + 约 1/oneIn 命中率', () => {
+  // 确定性：同一 key 多次调用结果一致
+  const k = 'bsc:0xdeadbeef';
+  assert.equal(inBaselineSample(k, 5), inBaselineSample(k, 5), '同 key 结果稳定');
+  assert.equal(inBaselineSample(null, 5), false, '空 key 不入样本');
+  assert.equal(inBaselineSample('x', 1), true, 'oneIn<=1 → 全量入样本');
+  // 分布：1000 个 key，命中率应接近 1/5(±5pp 容差)
+  let hit = 0;
+  for (let i = 0; i < 1000; i++) if (inBaselineSample('k:' + i, 5)) hit++;
+  const rate = hit / 1000;
+  assert.ok(rate > 0.15 && rate < 0.25, `命中率 ${rate} 应接近 0.2`);
+});

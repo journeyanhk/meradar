@@ -269,3 +269,36 @@ function connect() {
 loadInitial();
 connect();
 setInterval(loadStats, 30000);
+
+// ---------- 纸面回报面板 ----------
+const GROUP_LABEL = { baseline_seen: '对照(抽样)', tier_t1: 'T1', tier_t2: 'T2', entry_pass: '可试仓' };
+function pctOf(v) { return v == null ? '—' : (v * 100).toFixed(0) + '%'; }
+function spct(v) { if (v == null) return '—'; const s = Math.round(+v) + '%'; return +v > 0 ? '+' + s : s; }
+async function loadPaper() {
+  const body = document.getElementById('paperBody');
+  const sub = document.getElementById('paperSub');
+  try {
+    const q = filters.chain && filters.chain !== 'all' ? `?chain=${encodeURIComponent(filters.chain)}` : '';
+    const p = await fetch('/api/paper' + q).then((r) => r.json());
+    const chainName = p.chain === 'all' ? '全部链' : (CHAIN_LABEL[p.chain] || p.chain);
+    sub.textContent = `${chainName} · 对照组抽样 1/${p.config.baselineSampleOneIn} · 基础往返成本 ${p.config.baseCostPct}%`;
+    const rows = Object.entries(p.groups).map(([g, s]) => `
+      <tr>
+        <td>${GROUP_LABEL[g] || g}</td>
+        <td>${s.open}</td>
+        <td>${s.closed}</td>
+        <td>${s.deferred}/${s.skipped}</td>
+        <td class="${s.medianPnlPct > 0 ? 'pos' : s.medianPnlPct < 0 ? 'neg' : ''}">${spct(s.medianPnlPct)}</td>
+        <td>${pctOf(s.winRate)}</td>
+        <td class="${s.rugRate > 0 ? 'neg' : ''}">${pctOf(s.rugRate)}</td>
+        <td>${s.avgMfePct == null ? '—' : '+' + Math.round(+s.avgMfePct) + '%'}</td>
+        <td>${pctOf(s.hit2xRate)}</td>
+      </tr>`).join('');
+    body.innerHTML = `<table class="paper-tbl">
+      <thead><tr><th>组</th><th>持仓</th><th>已平</th><th>延/跳</th><th>中位</th><th>胜率</th><th>Rug</th><th>MFE均</th><th>2×率</th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+  } catch { body.textContent = '加载失败'; }
+}
+document.getElementById('paperBtn').addEventListener('click', () => { document.getElementById('paperOverlay').hidden = false; loadPaper(); });
+document.getElementById('paperClose').addEventListener('click', () => { document.getElementById('paperOverlay').hidden = true; });
+document.getElementById('paperOverlay').addEventListener('click', (e) => { if (e.target.id === 'paperOverlay') e.currentTarget.hidden = true; });

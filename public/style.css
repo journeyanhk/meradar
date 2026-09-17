@@ -120,3 +120,19 @@ body {
   .stats { grid-template-columns: repeat(3, 1fr); }
   .name { display: none; }
 }
+
+/* 纸面回报面板 */
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 50; }
+.overlay[hidden] { display: none; }
+.panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,.3); width: 100%; max-width: 680px; max-height: 90vh; overflow: auto; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.panel-head b { font-size: 15px; }
+.panel-sub { color: var(--muted); font-size: 12px; padding: 8px 16px 0; }
+.panel-body { padding: 12px 16px; }
+.panel-note { color: var(--muted); font-size: 11px; padding: 0 16px 14px; line-height: 1.5; }
+.paper-tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.paper-tbl th, .paper-tbl td { text-align: right; padding: 7px 6px; border-bottom: 1px solid var(--line); }
+.paper-tbl th:first-child, .paper-tbl td:first-child { text-align: left; font-weight: 600; }
+.paper-tbl th { color: var(--muted); font-weight: 500; font-size: 12px; }
+.paper-tbl td.pos { color: var(--ok); font-weight: 600; }
+.paper-tbl td.neg { color: var(--t2); font-weight: 600; }
