@@ -220,6 +220,42 @@ export async function readCurveFunds(chain, curve, quoteAddr, quoteDec = 18) {
   }
 }
 
+// 任意地址的代币余额(raw bigint)，带 TTL 缓存(默认 10min)——供 dev 余额评分维度用，避免每轮打 RPC。
+// 读失败回落到缓存旧值(若有)，否则 null；不抛错(评分维度缺失=unknown 由 scorecard 处理)。
+const balanceCache = new Map(); // `${chain}:${token}:${holder}` -> { at, raw }
+export async function readBalance(chain, token, holder, { ttlMs = 600000 } = {}) {
+  if (!token || !holder) return null;
+  const k = `${chain}:${String(token).toLowerCase()}:${String(holder).toLowerCase()}`;
+  const c = balanceCache.get(k);
+  const now = Date.now();
+  if (c && now - c.at < ttlMs) return c.raw;
+  try {
+    const client = httpClient(chain);
+    const raw = await client.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [holder] });
+    balanceCache.set(k, { at: now, raw });
+    return raw;
+  } catch (e) {
+    recordRpcError();
+    log.debug({ chain, token, holder, err: e.message }, 'readBalance 失败');
+    return c ? c.raw : null;
+  }
+}
+
+// dev 持仓占比(%)：balanceRaw / totalSupplyRaw × 100，同基单位无需 decimals。用 BigInt 保精度(万分位)。
+// 任一为空/供应量≤0 → null(unknown)。纯函数，供单测与 scoreinputs 复用。
+export function devHoldingPct(balanceRaw, totalSupplyRaw) {
+  if (balanceRaw == null || totalSupplyRaw == null) return null;
+  try {
+    const bal = BigInt(balanceRaw);
+    const sup = BigInt(totalSupplyRaw);
+    if (sup <= 0n) return null;
+    if (bal < 0n) return null;
+    return Number((bal * 1000000n) / sup) / 10000; // 保留 4 位小数
+  } catch {
+    return null;
+  }
+}
+
 // 报价币 -> 美元单价（供成交额换算），稳定币=1，WBNB=现价。
 export function quoteUsd(chain, sym) {
   const cfg = chainConfig(chain);

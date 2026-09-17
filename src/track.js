@@ -7,6 +7,7 @@ import { narrativeHit, copycatCount } from './narrative.js';
 import { maybeAlert, evaluateTier } from './alert.js';
 import { evaluateEntry } from './entry.js';
 import { shouldWriteSnapshot } from './snapshot.js';
+import { collectScoreInputs } from './scoreinputs.js';
 import { store } from './db.js';
 import { config, chainConfig, entryFilterFor } from './config.js';
 import { httpClient } from './chain.js';
@@ -375,6 +376,12 @@ export async function pollCandidate(chain, cand) {
   await maybeAlert(chain, fresh, metrics);
   // M4 纸面引擎：用本轮最终行(含 maybeAlert 落库的最新 tier) + metrics 开/标/平各分组模拟仓(只读)。
   const finalRow = store.get(cand.key);
+  // 序2：评分输入采集(只读)——仅 tier≥T2 或可试仓 PASS 时采集，控 RPC。挂进 metrics 供 scorecard(序3)消费。
+  const finalTier = finalRow?.tier ?? cand.tier;
+  if (RANK[finalTier] >= RANK.T2 || metrics.entry?.ok) {
+    try { metrics.scoreInputs = await collectScoreInputs(chain, finalRow, config.score?.inputs); }
+    catch (e) { log.debug({ err: e.message, key: cand.key }, '评分输入采集失败(忽略)'); }
+  }
   // snapshots 去重(写放大治理)：按最终 tier + 变化/心跳/事件判定是否落行。事件=tier 变化/entry 变化/撤池。
   // 用 prev(轮询开始的行)的 last_snapshot_* 作去重游标；prevBuyers 为上轮买家数。
   const snapEvent =

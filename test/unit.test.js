@@ -1600,3 +1600,62 @@ test('shouldWriteSnapshot：上次价为 0、这次有值视为大变化', () =>
   const last = { ts: 1_000_000, price: 0, depth: 0 };
   assert.equal(shouldWriteSnapshot({ tier: 'T1', now: 1_070_000, last, price: 0.01, depth: 500, buyers: 3, prevBuyers: 3 }), true);
 });
+
+// —— 序2 评分输入：devHoldingPct + 前10集中度 SQL —— //
+import { devHoldingPct } from '../src/enrich.js';
+import { DatabaseSync } from 'node:sqlite';
+
+test('devHoldingPct：占比计算与边界', () => {
+  const supply = 1_000_000_000n * 10n ** 18n;
+  // dev 持 25%
+  assert.equal(devHoldingPct(supply / 4n, supply), 25);
+  // dev 持 0
+  assert.equal(devHoldingPct(0n, supply), 0);
+  // dev 持满
+  assert.equal(devHoldingPct(supply, supply), 100);
+  // 小数保留：1.2345% → 保留 4 位
+  assert.equal(devHoldingPct(12345n, 1_000_000n), 1.2345);
+  // 缺参 / 供应量≤0 / 负余额 → null
+  assert.equal(devHoldingPct(null, supply), null);
+  assert.equal(devHoldingPct(100n, null), null);
+  assert.equal(devHoldingPct(100n, 0n), null);
+  assert.equal(devHoldingPct(-1n, supply), null);
+  // 字符串入参(total_supply 存 TEXT)也可
+  assert.equal(devHoldingPct('250', '1000'), 25);
+});
+
+test('前10买家净持仓集中度 SQL：净持仓、排除池/dev、top10 占比', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE trades(key TEXT, side TEXT, account TEXT, token_amount REAL)');
+  const ins = db.prepare('INSERT INTO trades(key, side, account, token_amount) VALUES (?, ?, ?, ?)');
+  // acctA 净持仓 = 100 - 30 = 70；acctB = 30；池子/ dev 应被排除
+  ins.run('k', 'buy', '0xAAA', 100);
+  ins.run('k', 'sell', '0xAAA', 30);
+  ins.run('k', 'buy', '0xBBB', 30);
+  ins.run('k', 'buy', '0xPOOL', 500); // 池子(排除)
+  ins.run('k', 'buy', '0xDEV', 400);  // 建币者(排除)
+  ins.run('k', 'buy', '0xCCC', 20);
+  ins.run('k', 'sell', '0xCCC', 25);  // 净持仓 -5 → HAVING pos>0 过滤掉
+  const q = db.prepare(`
+    WITH net AS (
+      SELECT account, SUM(CASE side WHEN 'buy' THEN token_amount ELSE -token_amount END) AS pos
+      FROM trades
+      WHERE key=@key AND account IS NOT NULL
+        AND (@pool IS NULL OR LOWER(account) <> @pool)
+        AND (@creator IS NULL OR LOWER(account) <> @creator)
+      GROUP BY account HAVING pos > 0
+    ),
+    ranked AS (SELECT pos, ROW_NUMBER() OVER (ORDER BY pos DESC) AS rn FROM net)
+    SELECT
+      (SELECT SUM(pos) FROM ranked WHERE rn <= 10) AS top10,
+      (SELECT SUM(pos) FROM net) AS total,
+      (SELECT COUNT(*) FROM net) AS holders`);
+  const r = q.get({ key: 'k', pool: '0xpool', creator: '0xdev' });
+  assert.equal(r.holders, 2, 'A/B 两个正净持仓地址(C 被砸负、池/dev 被排除)');
+  assert.equal(r.total, 100, 'A70 + B30');
+  assert.equal(r.top10, 100, '仅两户，top10=全部');
+  // 不排除任何地址时池子/ dev 计入
+  const r2 = q.get({ key: 'k', pool: null, creator: null });
+  assert.equal(r2.holders, 4, 'A/B/POOL/DEV');
+  assert.equal(r2.total, 1000, '70+30+500+400');
+});

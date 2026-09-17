@@ -439,6 +439,23 @@ const stmt = {
       SUM(CASE WHEN status='rejected' OR price_state='withdrawn' THEN 1 ELSE 0 END) AS rugged,
       SUM(CASE WHEN discovered_at >= @since THEN 1 ELSE 0 END) AS recent
     FROM candidates WHERE chain=@chain AND creator=@creator`),
+  // 买家净持仓集中度(供评分维度：前10地址净持仓占比)：按 account 聚合净持仓(buy-sell, human)，
+  // 排除池子/建币者两个非散户地址，只取净持仓为正者，前10之和 / 全部之和。仅覆盖 promote 之后的成交
+  // (trades 表口径)，是近似值而非全链持仓；作为散户集中度信号足够。窗口函数需 SQLite≥3.25(node:sqlite 满足)。
+  topHolderConcentration: db.prepare(`
+    WITH net AS (
+      SELECT account, SUM(CASE side WHEN 'buy' THEN token_amount ELSE -token_amount END) AS pos
+      FROM trades
+      WHERE key=@key AND account IS NOT NULL
+        AND (@pool IS NULL OR LOWER(account) <> @pool)
+        AND (@creator IS NULL OR LOWER(account) <> @creator)
+      GROUP BY account HAVING pos > 0
+    ),
+    ranked AS (SELECT pos, ROW_NUMBER() OVER (ORDER BY pos DESC) AS rn FROM net)
+    SELECT
+      (SELECT SUM(pos) FROM ranked WHERE rn <= 10) AS top10,
+      (SELECT SUM(pos) FROM net) AS total,
+      (SELECT COUNT(*) FROM net) AS holders`),
   countTrades: db.prepare(`SELECT COUNT(*) AS n FROM trades`),
   tradeFlow: db.prepare(`
     SELECT
@@ -639,6 +656,18 @@ export const store = {
     if (!creator) return { launches: 0, rugged: 0, recent: 0 };
     const r = stmt.creatorStats.get({ chain, creator, since: sinceMs });
     return { launches: r.launches || 0, rugged: r.rugged || 0, recent: r.recent || 0 };
+  },
+  // 前10买家净持仓集中度：返回 { top10Pct, holders }。holders 为净持仓为正的地址数(近似散户数)。
+  // pool/creator 传 null 则不排除。total=0(无成交)时 top10Pct=null。
+  topHolderConcentration(key, pool = null, creator = null) {
+    const r = stmt.topHolderConcentration.get({
+      key,
+      pool: pool ? String(pool).toLowerCase() : null,
+      creator: creator ? String(creator).toLowerCase() : null,
+    });
+    const total = r?.total || 0;
+    const top10 = r?.top10 || 0;
+    return { top10Pct: total > 0 ? (top10 / total) * 100 : null, holders: r?.holders || 0 };
   },
   // 维护 PRAGMA：checkpoint 截断 WAL、增量回收空闲页、更新查询统计。db 私有于本模块，故经 store 暴露。
   walCheckpoint() { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); },
