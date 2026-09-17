@@ -4,7 +4,7 @@
     "maxActiveCandidates": 400,
     "concurrency": 6,
     "archiveIfNoMomentumMin": 180,
-    "snapshotRetentionDays": 7
+    "snapshotRetentionDays": 3
   },
   "maintenance": {
     "enabled": true,
