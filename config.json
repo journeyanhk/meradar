@@ -6,6 +6,17 @@
     "archiveIfNoMomentumMin": 180,
     "snapshotRetentionDays": 7
   },
+  "maintenance": {
+    "enabled": true,
+    "hour": 4,
+    "batchSize": 5000,
+    "vacuumPages": 4000,
+    "tradesRetentionDays": 14,
+    "buyersRetentionDays": 14,
+    "v4PoolsRetentionHours": 48,
+    "poolCreatorsRetentionDays": 30,
+    "note": "每日 hour 点(本地时)执行库维护：按保留期分批删除 trades/buyers/v4_pools/pool_creators(v4_pools 仅删无对应 active/archived 候选的孤儿池)，随后 wal_checkpoint(TRUNCATE)+incremental_vacuum(vacuumPages 页≈16MB/次)+ANALYZE。SQLite 删行不自动归还磁盘,auto_vacuum=INCREMENTAL 已在建库时开启(老库需停服跑一次 `PRAGMA auto_vacuum=INCREMENTAL; VACUUM;` 后才生效)。"
+  },
   "admission": {
     "minBuyersToActivate": 5
   },

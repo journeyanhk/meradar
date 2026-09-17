@@ -1522,3 +1522,34 @@ test('inBaselineSample：确定性(同 key 恒定) + 约 1/oneIn 命中率', () 
   const rate = hit / 1000;
   assert.ok(rate > 0.15 && rate < 0.25, `命中率 ${rate} 应接近 0.2`);
 });
+
+// —— 数据库维护：分批删除循环 drain —— //
+import { drain } from '../src/maintenance.js';
+
+test('drain：分批删除循环到不足一批为止，累计行数正确', () => {
+  // 模拟共 23 行、每批 10：应删 10 + 10 + 3 = 23，调用 3 次
+  let remaining = 23;
+  let calls = 0;
+  const fn = (batch) => { calls++; const n = Math.min(batch, remaining); remaining -= n; return n; };
+  const total = drain(fn, 10);
+  assert.equal(total, 23, '累计删除等于总行数');
+  assert.equal(calls, 3, '10/10/3 三批');
+  assert.equal(remaining, 0);
+});
+
+test('drain：首批即不足一批(空表)时只调用一次', () => {
+  let calls = 0;
+  const total = drain((batch) => { calls++; return 0; }, 5000);
+  assert.equal(total, 0);
+  assert.equal(calls, 1, '返回 0<batch 立即停止');
+});
+
+test('drain：恰好整批倍数时会多跑一次确认到空', () => {
+  // 20 行、每批 10：删 10、删 10、删 0 → 3 次调用(最后一次确认已空)
+  let remaining = 20;
+  let calls = 0;
+  const fn = (batch) => { calls++; const n = Math.min(batch, remaining); remaining -= n; return n; };
+  const total = drain(fn, 10);
+  assert.equal(total, 20);
+  assert.equal(calls, 3, '整批倍数需一次空确认');
+});

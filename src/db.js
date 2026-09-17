@@ -7,6 +7,11 @@ mkdirSync(join(ROOT, 'data'), { recursive: true });
 const db = new DatabaseSync(join(ROOT, 'data', 'meradar.sqlite'));
 db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA busy_timeout = 5000'); // 等锁最多 5s，避免与在跑的服务并发写时立刻 SQLITE_BUSY
+db.exec('PRAGMA synchronous = NORMAL'); // WAL 下 NORMAL 安全且比默认 FULL 少一次 fsync/写
+db.exec('PRAGMA temp_store = MEMORY');  // 临时表/排序走内存，减少磁盘抖动
+db.exec('PRAGMA cache_size = -65536');  // 64MB 页缓存(负值=KB)
+// 增量回收：新库在建表前设置即生效；老库为 no-op，需一次性 `VACUUM` 后才切换(见 maintenance.js 注释)。
+db.exec('PRAGMA auto_vacuum = INCREMENTAL');
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS candidates (
@@ -43,6 +48,7 @@ CREATE TABLE IF NOT EXISTS candidates (
 CREATE INDEX IF NOT EXISTS idx_cand_status ON candidates(status);
 CREATE INDEX IF NOT EXISTS idx_cand_updated ON candidates(updated_at);
 CREATE INDEX IF NOT EXISTS idx_cand_symbol ON candidates(chain, symbol);
+CREATE INDEX IF NOT EXISTS idx_cand_chain_status_updated ON candidates(chain, status, updated_at);
 
 CREATE TABLE IF NOT EXISTS snapshots (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,6 +152,7 @@ CREATE TABLE IF NOT EXISTS v4_pools (
   PRIMARY KEY (chain, pool_id)
 );
 CREATE INDEX IF NOT EXISTS idx_v4_token ON v4_pools(chain, token);
+CREATE INDEX IF NOT EXISTS idx_v4_created ON v4_pools(created_at);
 
 -- 买家画像（M2c）：按地址跨币沉淀，为「自建聪明钱」预留列。
 -- tokens_bought_total = 该地址在库内买过的不同新币数(addBuyer 首次命中即 +1)；
@@ -396,6 +403,35 @@ const stmt = {
   insertTrade: db.prepare(`INSERT OR IGNORE INTO trades (key, chain, ts, side, account, quote_amount, token_amount, price, mcap_at_trade, fee_raw, tax_raw, block, tx_hash, log_index) VALUES (@key, @chain, @ts, @side, @account, @quote_amount, @token_amount, @price, @mcap_at_trade, @fee_raw, @tax_raw, @block, @tx_hash, @log_index)`),
   lastTradeTs: db.prepare(`SELECT MAX(ts) AS ts FROM trades WHERE key=?`),
   deleteOldTrades: db.prepare(`DELETE FROM trades WHERE ts < ?`),
+  deleteOldTradesBatch: db.prepare(`DELETE FROM trades WHERE rowid IN (SELECT rowid FROM trades WHERE ts < ? LIMIT ?)`),
+  // 维护清理(maintenance.js 每日调用)：
+  // buyers 不能按 first_ts 删——promote 快照买家 first_ts=0(见 engine.js)，时间截断会误删活跃币买家。
+  // 改按候选生命周期：孤儿(候选已删)或 归档/拒绝且 updated_at 超期 的 key 才删；active 候选的买家永不删。
+  deleteOldBuyers: db.prepare(`
+    DELETE FROM buyers WHERE rowid IN (
+      SELECT b.rowid FROM buyers b
+      LEFT JOIN candidates c ON c.key = b.key
+      WHERE c.key IS NULL
+         OR (c.status IN ('archived','rejected') AND c.updated_at < ?)
+      LIMIT ?
+    )`),
+  deleteOrphanV4Pools: db.prepare(`
+    DELETE FROM v4_pools WHERE rowid IN (
+      SELECT v.rowid FROM v4_pools v
+      WHERE v.created_at < ?
+        AND NOT EXISTS (
+          SELECT 1 FROM candidates c
+          WHERE c.chain = v.chain AND LOWER(c.address) = v.token AND c.status IN ('active','archived')
+        )
+      LIMIT ?
+    )`),
+  deleteOldPoolCreators: db.prepare(`DELETE FROM pool_creators WHERE rowid IN (SELECT rowid FROM pool_creators WHERE ts < ? LIMIT ?)`),
+  // 建币者历史(供评分维度6)：从 candidates 按 creator 聚合——总发币数、疑似 rug 数(rejected 或 撤池)、近 N 天数。
+  creatorStats: db.prepare(`
+    SELECT COUNT(*) AS launches,
+      SUM(CASE WHEN status='rejected' OR price_state='withdrawn' THEN 1 ELSE 0 END) AS rugged,
+      SUM(CASE WHEN discovered_at >= @since THEN 1 ELSE 0 END) AS recent
+    FROM candidates WHERE chain=@chain AND creator=@creator`),
   countTrades: db.prepare(`SELECT COUNT(*) AS n FROM trades`),
   tradeFlow: db.prepare(`
     SELECT
@@ -586,6 +622,20 @@ export const store = {
   addTrade(t) { return stmt.insertTrade.run({ account: null, quote_amount: 0, token_amount: 0, price: 0, mcap_at_trade: null, fee_raw: null, tax_raw: null, block: null, chain: null, tx_hash: null, log_index: null, ...t }).changes > 0; },
   lastTradeTs(key) { return stmt.lastTradeTs.get(key)?.ts ?? null; },
   purgeTrades(beforeMs) { return stmt.deleteOldTrades.run(beforeMs).changes; },
+  purgeTradesBatch(beforeMs, limit = 5000) { return stmt.deleteOldTradesBatch.run(beforeMs, limit).changes; },
+  // 维护清理：分批删除，返回本批删除行数(调用方循环到 0 为止)。
+  purgeBuyers(beforeMs, limit = 5000) { return stmt.deleteOldBuyers.run(beforeMs, limit).changes; },
+  purgeOrphanV4Pools(beforeMs, limit = 5000) { return stmt.deleteOrphanV4Pools.run(beforeMs, limit).changes; },
+  purgePoolCreators(beforeMs, limit = 5000) { return stmt.deleteOldPoolCreators.run(beforeMs, limit).changes; },
+  creatorStats(chain, creator, sinceMs) {
+    if (!creator) return { launches: 0, rugged: 0, recent: 0 };
+    const r = stmt.creatorStats.get({ chain, creator, since: sinceMs });
+    return { launches: r.launches || 0, rugged: r.rugged || 0, recent: r.recent || 0 };
+  },
+  // 维护 PRAGMA：checkpoint 截断 WAL、增量回收空闲页、更新查询统计。db 私有于本模块，故经 store 暴露。
+  walCheckpoint() { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); },
+  incrementalVacuum(pages = 4000) { db.exec(`PRAGMA incremental_vacuum(${pages})`); },
+  analyze() { db.exec('ANALYZE'); },
   tradeCount() { return stmt.countTrades.get().n; },
   tradeFlow(key, now = Date.now()) {
     const r = stmt.tradeFlow.get({ key, t30: now - 30 * 60_000, t1h: now - 3600_000, t10: now - 10 * 60_000 });
