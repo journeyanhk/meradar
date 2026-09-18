@@ -1663,7 +1663,7 @@ test('前10买家净持仓集中度 SQL：净持仓、排除池/dev、top10 占�
 });
 
 // —— 序B 报表纯函数：replayRule + bucketReturns —— //
-import { replayRule, bucketReturns } from '../src/paper.js';
+import { replayRule, bucketReturns, evalRuleStep } from '../src/paper.js';
 const T0 = 1_000_000;
 const mk = (min, price, pnl) => ({ ts: T0 + min * 60_000, price_usd: price, pnl_pct: pnl });
 
@@ -1704,6 +1704,34 @@ test('replayRule：+20% 后撤池 → 即刻 rug −100%(不被 tp/end 掩盖)',
   const r = replayRule(marks, { tp: 50, sl: 30, trail: 25 });
   assert.equal(r.exitReason, 'rug', '撤池标记先于所有规则触发');
   assert.equal(r.exitPnlPct, -100, 'rug 损失不得从规则统计消失');
+});
+
+test('evalRuleStep：与 replayRule 共用一份判定 —— 逐步喂 mark 得到同一退出', () => {
+  // 实时监控口径：维护 state，逐条 mark 调 evalRuleStep，首个非 null 即触发退出。
+  const rule = { tp: null, sl: null, trail: 25 };
+  const marks = [mk(0, 100, -2), mk(2, 80, -22), mk(5, 200, 98), mk(10, 140, 38)];
+  const state = { entry: marks[0].price_usd, openTs: marks[0].ts, peak: marks[0].price_usd, mae: 0 };
+  let exit = null;
+  for (const m of marks) { exit = evalRuleStep(state, m, rule); if (exit) break; }
+  const batch = replayRule(marks, rule);
+  assert.equal(exit.exitReason, 'trail');
+  assert.equal(exit.exitReason, batch.exitReason, '实时与回放同口径');
+  assert.equal(exit.exitPnlPct, batch.exitPnlPct);
+  assert.ok(Math.abs(exit.maePct - batch.maePct) < 1e-9);
+});
+
+test('evalRuleStep：撤池标记先于所有规则 → rug −100%', () => {
+  const state = { entry: 100, openTs: T0, peak: 120, mae: -5 };
+  const r = evalRuleStep(state, { ts: T0 + 60_000, price_usd: 0, pnl_pct: -100, price_state: 'withdrawn' }, { tp: 50, sl: 30 });
+  assert.equal(r.exitReason, 'rug');
+  assert.equal(r.exitPnlPct, -100);
+});
+
+test('evalRuleStep：未触发返回 null（继续持有）', () => {
+  const state = { entry: 100, openTs: T0, peak: 100, mae: 0 };
+  const r = evalRuleStep(state, mk(1, 105, 3), { tp: 50, sl: 30, trail: 25 });
+  assert.equal(r, null);
+  assert.equal(state.peak, 105, 'state 就地更新峰值');
 });
 
 test('bucketReturns：未平仓仓龄不足的桶为 null；取≤桶时刻最后一个 mark', () => {

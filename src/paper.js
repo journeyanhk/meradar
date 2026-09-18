@@ -89,29 +89,37 @@ export function bucketReturns(marks, openTs, ageMs, isClosed, bucketsMin) {
 // 退出规则回放：按 marks(ts 升序) 模拟一套 {tp,sl,trail,maxHoldMin}(百分比/分钟，null=不启用)。
 // 每 mark 检查序：止损 → 追踪回撤 → 止盈 → 最长持有；都不触发则持有到最后一个 mark(reason='end')。
 // 退出收益取触发 mark 的 pnl_pct(已扣往返)。maePct=持有期内相对入场价的最深回撤(%)。价格判定用 price_usd/entry。
+// 单步规则判定(纯函数、就地更新 state.peak/state.mae)：给定累积状态与一条 mark，
+// 返回退出决策 {exitPnlPct,exitReason,maePct,holdMin} 或 null(继续持有)。
+// 实时监控(序C)与批量回放共用此函数，保证「触发线」两套口径完全一致。
+// state = { entry, openTs, peak, mae }；rule = {tp,sl,trail,maxHoldMin}(百分比/分钟，null=不启用)。
+export function evalRuleStep(state, m, rule = {}) {
+  const { tp = null, sl = null, trail = null, maxHoldMin = null } = rule;
+  const done = (reason) => ({ exitPnlPct: m.pnl_pct, exitReason: reason, maePct: state.mae, holdMin: (m.ts - state.openTs) / 60000 });
+  // 撤池：先于所有规则，抽干即 −100% 退出(rug)。price=0 的平仓标记语义是 −100%，绝不回退。
+  if (m.price_state === 'withdrawn' || !(m.price_usd > 0)) return done('rug');
+  const p = m.price_usd;
+  const ret = (p / state.entry - 1) * 100;
+  if (ret < state.mae) state.mae = ret;
+  if (p > state.peak) state.peak = p;
+  if (sl != null && ret <= -sl) return done('sl');
+  if (trail != null && state.peak > state.entry && (p / state.peak - 1) * 100 <= -trail) return done('trail');
+  if (tp != null && ret >= tp) return done('tp');
+  if (maxHoldMin != null && (m.ts - state.openTs) / 60000 >= maxHoldMin) return done('maxHold');
+  return null;
+}
+
 export function replayRule(marks, rule = {}) {
   // 撤池平仓标记 price=0 但语义是 −100%，必须保留(否则 rug 仓被当成末个正价 end 结束，规则统计系统性偏乐观)。
   const pts = (marks || []).filter((m) => m.price_usd > 0 || m.price_state === 'withdrawn');
   if (!pts.length) return null;
-  const entry = pts[0].price_usd;
-  const openTs = pts[0].ts;
-  const { tp = null, sl = null, trail = null, maxHoldMin = null } = rule;
-  let peak = entry;
-  let mae = 0;
-  const finish = (m, reason) => ({ exitPnlPct: m.pnl_pct, exitReason: reason, maePct: mae, holdMin: (m.ts - openTs) / 60000 });
+  const state = { entry: pts[0].price_usd, openTs: pts[0].ts, peak: pts[0].price_usd, mae: 0 };
   for (const m of pts) {
-    // 撤池：先于所有规则，抽干即 −100% 退出(rug)。
-    if (m.price_state === 'withdrawn' || !(m.price_usd > 0)) return finish(m, 'rug');
-    const p = m.price_usd;
-    const ret = (p / entry - 1) * 100;
-    if (ret < mae) mae = ret;
-    if (p > peak) peak = p;
-    if (sl != null && ret <= -sl) return finish(m, 'sl');
-    if (trail != null && peak > entry && (p / peak - 1) * 100 <= -trail) return finish(m, 'trail');
-    if (tp != null && ret >= tp) return finish(m, 'tp');
-    if (maxHoldMin != null && (m.ts - openTs) / 60000 >= maxHoldMin) return finish(m, 'maxHold');
+    const exit = evalRuleStep(state, m, rule);
+    if (exit) return exit;
   }
-  return finish(pts[pts.length - 1], 'end');
+  const last = pts[pts.length - 1];
+  return { exitPnlPct: last.pnl_pct, exitReason: 'end', maePct: state.mae, holdMin: (last.ts - state.openTs) / 60000 };
 }
 
 // 未平仓现值统计(纯聚合)：现值收益中位、MFE 中位、1.5×/2× 命中率、当前自峰回撤>50% 占比。
