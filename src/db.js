@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { ROOT } from './config.js';
 
 mkdirSync(join(ROOT, 'data'), { recursive: true });
-const db = new DatabaseSync(join(ROOT, 'data', 'meradar.sqlite'));
+const db = new DatabaseSync(process.env.MERADAR_DB || join(ROOT, 'data', 'meradar.sqlite'));
 db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA busy_timeout = 5000'); // 等锁最多 5s，避免与在跑的服务并发写时立刻 SQLITE_BUSY
 db.exec('PRAGMA synchronous = NORMAL'); // WAL 下 NORMAL 安全且比默认 FULL 少一次 fsync/写
@@ -320,6 +320,18 @@ ensureColumns('paper_marks', [
   ['price_state', 'price_state TEXT'],
 ]);
 
+// 序C：手动模拟/实盘记录/关注仓(grp=manual|real|watch) + 退出规则绑定 + 实时触发/风险告警去重。
+ensureColumns('paper_positions', [
+  ['origin', "origin TEXT DEFAULT 'auto'"],   // auto | manual | real | watch —— 区分自动组与用户仓
+  ['notes', 'notes TEXT'],                      // 用户备注
+  ['rule_json', 'rule_json TEXT'],              // 绑定的退出规则 {tp,sl,trail,maxHoldMin}
+  ['qty', 'qty REAL'],                          // 实盘持仓数量(real 仓可选)
+  ['rule_fired_reason', 'rule_fired_reason TEXT'], // 实时规则已触发原因(去重，只告警一次)
+  ['rule_fired_ts', 'rule_fired_ts INTEGER'],
+  ['risk_flags_json', 'risk_flags_json TEXT'],  // 上次已告警的风险标记集合(去重)
+  ['meta_json', 'meta_json TEXT'],
+]);
+
 const stmt = {
   upsertCandidate: db.prepare(`
     INSERT INTO candidates (key, chain, address, launchpad, name, symbol, decimals, total_supply, creator, pool, pool_type, quote_symbol, launch_time, status, discovered_at, updated_at)
@@ -589,6 +601,27 @@ const stmt = {
     FROM paper_marks m JOIN paper_positions p ON p.id = m.position_id
     WHERE p.grp=@grp AND (@chain IS NULL OR p.chain=@chain)
     ORDER BY m.position_id, m.ts`),
+  // 序C：用户仓(手动/实盘/关注)。origin!='auto' 的开仓/延期仓明细，供面板单列对比与实时监控。
+  paperUserPositions: db.prepare(`
+    SELECT id, key, chain, grp, origin, status, signal_ts, open_ts, entry_price_usd, entry_mcap_usd,
+      notional_usd, qty, roundtrip_cost_pct, close_ts, close_price_usd, close_reason, pnl_usd, pnl_pct,
+      peak_price_usd, trough_price_usd, last_price_usd, last_mcap_usd, last_mark_ts,
+      rule_json, rule_fired_reason, rule_fired_ts, notes
+    FROM paper_positions
+    WHERE origin IN ('manual','real','watch') AND (@chain IS NULL OR chain=@chain)
+    ORDER BY (status='open') DESC, COALESCE(open_ts, signal_ts) DESC`),
+  paperUserOpen: db.prepare(`
+    INSERT INTO paper_positions
+      (key, chain, grp, origin, status, signal_ts, open_ts, entry_price_usd, entry_mcap_usd, notional_usd, qty,
+       roundtrip_cost_pct, horizon_end_ts, peak_price_usd, trough_price_usd, last_price_usd, last_mcap_usd, last_mark_ts, rule_json, notes)
+    VALUES (@key, @chain, @grp, @origin, 'open', @signal_ts, @open_ts, @entry_price_usd, @entry_mcap_usd, @notional_usd, @qty,
+       @roundtrip_cost_pct, @horizon_end_ts, @entry_price_usd, @entry_price_usd, @entry_price_usd, @entry_mcap_usd, @open_ts, @rule_json, @notes)
+    ON CONFLICT(key, grp) DO NOTHING`),
+  paperSetRule: db.prepare(`UPDATE paper_positions SET rule_json=@rule_json, rule_fired_reason=NULL, rule_fired_ts=NULL WHERE id=@id`),
+  paperSetRuleFired: db.prepare(`UPDATE paper_positions SET rule_fired_reason=@reason, rule_fired_ts=@ts WHERE id=@id AND rule_fired_ts IS NULL`),
+  paperSetRiskFlags: db.prepare(`UPDATE paper_positions SET risk_flags_json=@risk_flags_json WHERE id=@id`),
+  paperGetById: db.prepare(`SELECT * FROM paper_positions WHERE id=?`),
+  paperPositionByKeyOrigin: db.prepare(`SELECT * FROM paper_positions WHERE key=? AND origin=? ORDER BY id DESC LIMIT 1`),
 };
 
 // buyerProfilesForAccounts 的 IN(...) prepared statement 按占位符个数缓存(节点 sqlite 需固定 SQL)。
@@ -840,6 +873,20 @@ export const store = {
   paperClosedPnls(grp, chain = null) { return chain ? stmt.paperClosedPnlsByChain.all(grp, chain) : stmt.paperClosedPnls.all(grp); },
   paperStatPositions(grp, chain = null) { return stmt.paperStatPositions.all({ grp, chain }); },
   paperMarksForGrp(grp, chain = null) { return stmt.paperMarksForGrp.all({ grp, chain }); },
+  // 序C：用户仓(手动/实盘/关注)
+  paperUserPositions(chain = null) { return stmt.paperUserPositions.all({ chain }); },
+  paperUserOpen(p) {
+    return stmt.paperUserOpen.run({
+      open_ts: null, entry_price_usd: null, entry_mcap_usd: null, notional_usd: null, qty: null,
+      roundtrip_cost_pct: null, horizon_end_ts: null, rule_json: null, notes: null, origin: 'manual',
+      ...p,
+    }).changes > 0;
+  },
+  paperGetById(id) { return stmt.paperGetById.get(id); },
+  paperPositionByKeyOrigin(key, origin) { return stmt.paperPositionByKeyOrigin.get(key, origin); },
+  paperSetRule(id, rule_json) { return stmt.paperSetRule.run({ id, rule_json }).changes > 0; },
+  paperSetRuleFired(id, reason, ts) { return stmt.paperSetRuleFired.run({ id, reason, ts }).changes > 0; },
+  paperSetRiskFlags(id, risk_flags_json) { stmt.paperSetRiskFlags.run({ id, risk_flags_json }); },
   // 已平仓>beforeMs 的仓位其 marks 清理(仓位行永久保留)。
   purgePaperMarks(beforeMs) { return stmt.paperDeleteClosedMarks.run(beforeMs).changes; },
 };

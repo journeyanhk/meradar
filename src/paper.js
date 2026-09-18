@@ -11,6 +11,9 @@ const log = child('paper');
 const cfg = config.paper || {};
 const RANK = { T0: 0, T1: 1, T2: 2, T3: 3 };
 const HOUR = 3600_000;
+// 序C：用户仓分组(手动模拟/实盘/关注)。这些仓由用户经 API/Telegram 建立，不由自动分组开仓，
+// 也不受 24h horizon 自动平仓约束——只在撤池或用户手动平仓时关闭。
+const USER_GROUPS = new Set(['manual', 'real', 'watch']);
 
 // 序B 报表预设：分时桶(分钟) + 三套退出规则(供回放对比)。可被 config.paper.timeBucketsMin/rules 覆盖。
 const BUCKETS_MIN = cfg.timeBucketsMin ?? [5, 15, 60, 240, 1440];
@@ -142,7 +145,6 @@ export function openPositionStats(rows) {
 }
 
 // —— 编排(有副作用) ——
-
 function tryOpen(chain, row, metrics, grp, now) {
   const rt = roundtripCostPct(metrics.poolFeePct, cfg);
   if (rt == null || !openGate(metrics, cfg)) {
@@ -238,8 +240,8 @@ export function onPoll(chain, row, metrics) {
       have.add(pos.grp);
       if (pos.status === 'open') {
         if (rugged) recordClose(pos, 0, 0, now, 'withdrawn', state); // 撤池立即记 −100%
-        else if (now >= pos.horizon_end_ts) recordClose(pos, metrics.priceUsd, metrics.marketCapUsd, now, 'horizon', state);
-        else recordMark(pos, metrics.priceUsd, metrics.marketCapUsd, now, state); // 事件即时标记
+        else if (!USER_GROUPS.has(pos.grp) && now >= pos.horizon_end_ts) recordClose(pos, metrics.priceUsd, metrics.marketCapUsd, now, 'horizon', state);
+        else recordMark(pos, metrics.priceUsd, metrics.marketCapUsd, now, state); // 事件即时标记(用户仓不受 horizon 约束)
       } else if (pos.status === 'deferred') {
         if (now >= pos.defer_until_ts) store.paperExpireDeferred(pos.id, now);
         else if (groups.has(pos.grp)) tryReopenDeferred(pos, metrics, now);
@@ -270,7 +272,7 @@ function sweep() {
       const price = cand?.price_usd ?? 0;
       const mcap = cand?.market_cap_usd ?? null;
       if (state === 'withdrawn') recordClose(pos, 0, 0, now, 'withdrawn', state); // 撤池立即记 −100%
-      else if (now >= pos.horizon_end_ts) recordClose(pos, price, mcap, now, 'horizon', state);
+      else if (!USER_GROUPS.has(pos.grp) && now >= pos.horizon_end_ts) recordClose(pos, price, mcap, now, 'horizon', state);
       else recordMark(pos, price, mcap, now, state);
     } catch (e) {
       log.debug({ err: e.message, id: pos.id }, 'paper.sweep 单仓失败(忽略)');
@@ -283,6 +285,68 @@ export function startPaper() {
   const ms = (cfg.markLoopSec ?? 60) * 1000;
   setInterval(sweep, ms).unref?.();
   log.info({ notionalUsd: cfg.notionalUsd ?? 100, horizonHours: cfg.horizonHours ?? 24, markLoopSec: cfg.markLoopSec ?? 60 }, '纸面引擎已启动');
+}
+
+// —— 序C：用户仓编排(手动模拟 / 实盘记录 / 关注) ——
+// 只读原则不变：仓位仅记录与追踪，绝不触发任何链上交易。key 必须是本站已存在的候选。
+// 校验规则: {tp,sl,trail,maxHoldMin}，各项为正数或 null；至少一项非空才算有效绑定。
+export function sanitizeRule(rule) {
+  if (!rule || typeof rule !== 'object') return null;
+  const num = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null));
+  const out = { tp: num(rule.tp), sl: num(rule.sl), trail: num(rule.trail), maxHoldMin: num(rule.maxHoldMin) };
+  if (out.tp == null && out.sl == null && out.trail == null && out.maxHoldMin == null) return null;
+  return out;
+}
+
+// 开一个用户仓。origin ∈ manual|real|watch。返回 {ok, error?, position?}。
+export function openUserPosition(key, origin, opts = {}) {
+  if (!USER_GROUPS.has(origin)) return { ok: false, error: `未知仓位类型: ${origin}` };
+  const cand = store.get(key);
+  if (!cand) return { ok: false, error: `未找到候选 ${key}` };
+  const now = Date.now();
+  const entry = opts.entryPriceUsd != null && Number(opts.entryPriceUsd) > 0 ? Number(opts.entryPriceUsd) : cand.price_usd;
+  if (!(entry > 0)) return { ok: false, error: '当前无有效价格，无法开仓(可传 entryPriceUsd 指定入场价)' };
+  const rule = sanitizeRule(opts.rule);
+  const rtCost = origin === 'real' ? 0 : (cfg.baseCostPct ?? 2); // 实盘按真实成交，往返成本记 0；模拟/关注含基础成本
+  const notional = opts.notionalUsd != null && Number(opts.notionalUsd) > 0 ? Number(opts.notionalUsd)
+    : (opts.qty != null && Number(opts.qty) > 0 ? Number(opts.qty) * entry : (cfg.notionalUsd ?? 100));
+  const created = store.paperUserOpen({
+    key, chain: cand.chain, grp: origin, origin,
+    signal_ts: now, open_ts: now, entry_price_usd: entry, entry_mcap_usd: cand.market_cap_usd ?? null,
+    notional_usd: notional, qty: opts.qty != null && Number(opts.qty) > 0 ? Number(opts.qty) : null,
+    roundtrip_cost_pct: rtCost, horizon_end_ts: null, // 用户仓无 horizon 自动平仓
+    rule_json: rule ? JSON.stringify(rule) : null, notes: opts.notes || null,
+  });
+  if (!created) return { ok: false, error: `该币已存在 ${origin} 仓(先平仓再重开)` };
+  const pos = store.paperPositionByKeyOrigin(key, origin);
+  if (pos) {
+    const { pnlUsd, pnlPct } = markPnl(entry, entry, notional, rtCost);
+    store.paperAddMark({ position_id: pos.id, ts: now, price_usd: entry, mcap_usd: cand.market_cap_usd ?? null, pnl_usd: pnlUsd, pnl_pct: pnlPct, price_state: 'ok' });
+  }
+  log.info({ key, origin, entry, notional }, '用户仓已开');
+  return { ok: true, position: pos };
+}
+
+// 平一个用户仓(按当前候选价)。返回 {ok, error?, position?}。
+export function closeUserPosition(key, origin) {
+  const pos = store.paperPositionByKeyOrigin(key, origin);
+  if (!pos || pos.status !== 'open') return { ok: false, error: `未找到可平的 ${origin} 仓` };
+  const cand = store.get(key);
+  const now = Date.now();
+  const price = cand?.price_usd ?? pos.last_price_usd ?? pos.entry_price_usd;
+  recordClose(pos, price, cand?.market_cap_usd ?? null, now, 'manual_close', cand?.price_state ?? null);
+  log.info({ key, origin }, '用户仓已平');
+  return { ok: true, position: store.paperGetById(pos.id) };
+}
+
+// 给已开的用户仓绑定/更新退出规则(重置已触发标记)。
+export function bindRuleToPosition(key, origin, rule) {
+  const pos = store.paperPositionByKeyOrigin(key, origin);
+  if (!pos || pos.status !== 'open') return { ok: false, error: `未找到可绑定的 ${origin} 仓` };
+  const r = sanitizeRule(rule);
+  if (!r) return { ok: false, error: '规则无效(tp/sl/trail/maxHoldMin 至少一项为正数)' };
+  store.paperSetRule(pos.id, JSON.stringify(r));
+  return { ok: true, position: store.paperGetById(pos.id), rule: r };
 }
 
 // —— 统计(供 /api/paper) ——
@@ -300,8 +364,29 @@ function quantile(a, q) {
   return lo === hi ? s[lo] : s[lo] + (s[hi] - s[lo]) * (pos - lo);
 }
 
-export function paperStats(chain = null) {
-  const key = chain || '__all__';
+// 序C：用户仓视图(手动/实盘/关注)——每仓当前净值 + MFE + 绑定规则 + 触发/风险状态。单列对比，不并入自动组统计。
+export function userPositionsView(chain = null) {
+  const rows = store.paperUserPositions(chain);
+  return rows.map((r) => {
+    const rule = r.rule_json ? safeParse(r.rule_json) : null;
+    const closed = r.status === 'closed';
+    const cur = closed ? r.pnl_pct
+      : (r.entry_price_usd > 0 && r.last_price_usd != null ? markPnl(r.entry_price_usd, r.last_price_usd, r.notional_usd, r.roundtrip_cost_pct).pnlPct : null);
+    const mfe = r.entry_price_usd > 0 && r.peak_price_usd != null ? (r.peak_price_usd / r.entry_price_usd - 1) * 100 : null;
+    const cand = store.get(r.key);
+    return {
+      id: r.id, key: r.key, chain: r.chain, origin: r.origin, status: r.status,
+      name: cand?.name ?? null, symbol: cand?.symbol ?? null,
+      openTs: r.open_ts, entryPriceUsd: r.entry_price_usd, lastPriceUsd: r.last_price_usd,
+      notionalUsd: r.notional_usd, qty: r.qty, curPct: cur, mfePct: mfe,
+      closeReason: r.close_reason, closedPnlPct: closed ? r.pnl_pct : null,
+      rule, ruleFiredReason: r.rule_fired_reason, ruleFiredTs: r.rule_fired_ts, notes: r.notes,
+    };
+  });
+}
+function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+export function paperStats(chain = null) {  const key = chain || '__all__';
   const c = statsCache.get(key);
   const now = Date.now();
   if (c && now - c.at < STATS_TTL_MS) return c.val;
@@ -398,5 +483,6 @@ function computePaperStats(chain = null) {
     chain: chain || 'all',
     config: { notionalUsd: cfg.notionalUsd ?? 100, horizonHours: cfg.horizonHours ?? 24, baseCostPct: cfg.baseCostPct ?? 2, baselineSampleOneIn: cfg.baselineSampleOneIn ?? 5, bucketsMin: BUCKETS_MIN, ruleNames: RULES.map((r) => r.name) },
     groups: out,
+    userPositions: userPositionsView(chain),
   };
 }

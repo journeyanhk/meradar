@@ -1663,7 +1663,7 @@ test('前10买家净持仓集中度 SQL：净持仓、排除池/dev、top10 占�
 });
 
 // —— 序B 报表纯函数：replayRule + bucketReturns —— //
-import { replayRule, bucketReturns, evalRuleStep } from '../src/paper.js';
+import { replayRule, bucketReturns, evalRuleStep, sanitizeRule } from '../src/paper.js';
 const T0 = 1_000_000;
 const mk = (min, price, pnl) => ({ ts: T0 + min * 60_000, price_usd: price, pnl_pct: pnl });
 
@@ -1749,4 +1749,13 @@ test('bucketReturns：已平仓则终态收益向后传播（rug −100% 覆盖�
   assert.equal(b[5], -2, '5min 时还没 rug');
   assert.equal(b[15], -100, '已平：15min 桶取到平仓 mark');
   assert.equal(b[60], -100, '终态向后传播');
+});
+
+// —— 序C：用户仓规则校验(纯函数) —— //
+test('sanitizeRule：过滤非正数与全空，规范化字段', () => {
+  assert.deepEqual(sanitizeRule({ tp: 50, sl: '30', trail: null, maxHoldMin: 0 }), { tp: 50, sl: 30, trail: null, maxHoldMin: null });
+  assert.equal(sanitizeRule({ tp: null, sl: null, trail: null, maxHoldMin: null }), null, '全空 → null');
+  assert.equal(sanitizeRule({ tp: -5, sl: 'abc' }), null, '非正数被剔除后全空 → null');
+  assert.equal(sanitizeRule(null), null);
+  assert.deepEqual(sanitizeRule({ trail: 25 }), { tp: null, sl: null, trail: 25, maxHoldMin: null });
 });

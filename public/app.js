@@ -333,6 +333,25 @@ async function loadPaper() {
         <table class="paper-tbl"><thead><tr><th>规则</th><th>已平/未平</th><th>中位</th><th>均值</th><th>胜率</th><th>Rug</th><th>MAE均</th></tr></thead><tbody>${rr}</tbody></table></div>`;
     }).join('');
 
+    // 表5：用户仓(手动模拟/实盘/关注)——单列对比，不并入自动组统计
+    const ORIGIN_LABEL = { manual: '手动模拟', real: '实盘', watch: '关注' };
+    const ups = p.userPositions || [];
+    const upRows = ups.map((u) => {
+      const rk = u.rule ? [u.rule.tp ? 'tp' + u.rule.tp : '', u.rule.sl ? 'sl' + u.rule.sl : '', u.rule.trail ? '追' + u.rule.trail : '', u.rule.maxHoldMin ? u.rule.maxHoldMin + 'm' : ''].filter(Boolean).join('/') : '—';
+      const st = u.status === 'closed' ? (u.closeReason === 'withdrawn' ? '已撤池' : '已平') : (u.ruleFiredReason ? '规则触发·' + u.ruleFiredReason : '持有中');
+      const pnl = u.status === 'closed' ? u.closedPnlPct : u.curPct;
+      return `<tr>
+        <td>${ORIGIN_LABEL[u.origin] || u.origin}</td>
+        <td title="${esc(u.key)}">${esc(u.symbol || u.name || u.key)}</td>
+        <td class="${scls(pnl)}">${spct(pnl)}</td>
+        <td>${u.mfePct == null ? '—' : spct(u.mfePct)}</td>
+        <td>${rk}</td>
+        <td class="${u.ruleFiredReason || u.closeReason === 'withdrawn' ? 'neg' : ''}">${st}</td>
+      </tr>`; }).join('');
+    const userBlock = ups.length ? `
+      <div class="paper-sec-t">我的仓位（手动/实盘/关注 · 只读追踪）</div>
+      <table class="paper-tbl"><thead><tr><th>类型</th><th>币</th><th>现值/结果</th><th>MFE</th><th>规则</th><th>状态</th></tr></thead><tbody>${upRows}</tbody></table>` : '';
+
     body.innerHTML = `
       <div class="paper-sec-t">状态与已平仓</div>
       <table class="paper-tbl"><thead><tr><th>组</th><th>持仓</th><th>已平</th><th>延/过期/跳</th><th>中位</th><th>胜率</th><th>Rug</th><th>MFE均</th><th>2×率</th></tr></thead><tbody>${summ}</tbody></table>
@@ -341,7 +360,8 @@ async function loadPaper() {
       <div class="paper-sec-t">分时收益中位（开仓后 · 此刻退出净值）</div>
       <table class="paper-tbl"><thead><tr><th>组</th>${bktHead}</tr></thead><tbody>${bktRows}</tbody></table>
       <div class="paper-sec-t">退出规则回放（把 MFE 变实现收益）</div>
-      ${ruleBlocks}`;
+      ${ruleBlocks}
+      ${userBlock}`;
   } catch { body.textContent = '加载失败'; }
 }
 document.getElementById('paperBtn').addEventListener('click', () => { document.getElementById('paperOverlay').hidden = false; loadPaper(); });

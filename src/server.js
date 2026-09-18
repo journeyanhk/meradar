@@ -11,7 +11,7 @@ import { rpcCapabilities } from './rpccap.js';
 import { rpcRouting } from './chain.js';
 import { child } from './logger.js';
 import { buyerRatios } from './buyer.js';
-import { paperStats } from './paper.js';
+import { paperStats, openUserPosition, closeUserPosition, bindRuleToPosition } from './paper.js';
 import { PRICE_STALE_MS, PRICE_UNKNOWN_MS } from './price.js';
 
 const log = child('server');
@@ -156,6 +156,34 @@ export async function startServer() {
   // M4 纸面引擎统计：各分组(baseline_seen/tier_t1/tier_t2/entry_pass)的开/平/延期/跳过计数
   // + 已平仓的均值/中位/胜率/持有时长/rug 率/MFE/MAE/2× 命中。?chain= 分链(空=全量三链合计)。
   app.get('/api/paper', async (req) => paperStats(req.query?.chain || null));
+
+  // 序C：用户仓(手动模拟/实盘记录/关注)——只读追踪，绝不触发链上交易。
+  // POST /api/paper/position { key, origin(manual|real|watch), notionalUsd?, qty?, entryPriceUsd?, rule?, notes? }
+  app.post('/api/paper/position', async (req, reply) => {
+    const b = req.body || {};
+    if (!b.key || !b.origin) return reply.code(400).send({ error: '缺少 key 或 origin' });
+    const r = openUserPosition(String(b.key), String(b.origin), {
+      notionalUsd: b.notionalUsd, qty: b.qty, entryPriceUsd: b.entryPriceUsd, rule: b.rule, notes: b.notes,
+    });
+    if (!r.ok) return reply.code(400).send({ error: r.error });
+    return { ok: true, position: r.position };
+  });
+  // POST /api/paper/position/close { key, origin }
+  app.post('/api/paper/position/close', async (req, reply) => {
+    const b = req.body || {};
+    if (!b.key || !b.origin) return reply.code(400).send({ error: '缺少 key 或 origin' });
+    const r = closeUserPosition(String(b.key), String(b.origin));
+    if (!r.ok) return reply.code(400).send({ error: r.error });
+    return { ok: true, position: r.position };
+  });
+  // POST /api/paper/position/rule { key, origin, rule:{tp,sl,trail,maxHoldMin} }
+  app.post('/api/paper/position/rule', async (req, reply) => {
+    const b = req.body || {};
+    if (!b.key || !b.origin) return reply.code(400).send({ error: '缺少 key 或 origin' });
+    const r = bindRuleToPosition(String(b.key), String(b.origin), b.rule);
+    if (!r.ok) return reply.code(400).send({ error: r.error });
+    return { ok: true, position: r.position, rule: r.rule };
+  });
 
   // SSE 实时推送
   app.get('/api/stream', (req, reply) => {
