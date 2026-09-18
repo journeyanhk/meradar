@@ -6,6 +6,8 @@ import { config } from './config.js';
 import { store } from './db.js';
 import { child } from './logger.js';
 import { createHash } from 'node:crypto';
+import { sendTelegram } from './notify/telegram.js';
+import { sendServerChan } from './notify/serverchan.js';
 
 const log = child('paper');
 const cfg = config.paper || {};
@@ -226,9 +228,72 @@ function recordClose(pos, price, mcap, now, reason, state) {
   if (ok) store.paperAddMark({ position_id: pos.id, ts: now, price_usd: p, mcap_usd: mcap ?? null, pnl_usd: pnlUsd, pnl_pct: pnlPct, price_state: state ?? reason });
 }
 
+// —— 序C：用户仓实时监控(退出规则触发 + 风险告警) ——
+// 只读：仅告警，绝不自动平仓、绝不触发链上交易。触发判定复用 evalRuleStep(与回放同口径)。
+async function pushAlert(title, text) {
+  try { await sendTelegram(text, { silent: false }); } catch { /* noop */ }
+  try { await sendServerChan(title, text.replace(/<[^>]+>/g, '')); } catch { /* noop */ }
+}
+function posLabel(pos, cand) {
+  const ORIGIN = { manual: '手动模拟', real: '实盘', watch: '关注' };
+  return `${ORIGIN[pos.origin] || pos.origin}·${cand?.symbol || cand?.name || pos.key}`;
+}
+
+// 对一个 open 用户仓做实时监控：绑定规则触发(去重后告警一次) + 风险告警(撤池/安全翻转/深度骤降>50%)。
+// state 由仓位上已存的充分统计(entry/peak/trough/open_ts)重建，无需回扫 marks。
+function monitorUserPosition(pos, metrics, now, rugged) {
+  const cand = store.get(pos.key);
+  // 1) 撤池：rug 已在 onPoll 平仓，这里补一条告警(去重)。
+  if (rugged) { fireRisk(pos, 'withdrawn', `⛔ <b>${posLabel(pos, cand)}</b> 撤池归零(−100%)`, now); return; }
+  const price = metrics.priceUsd;
+  // 2) 退出规则触发(仅当已绑定且尚未触发过)
+  if (pos.rule_json && !pos.rule_fired_ts && pos.entry_price_usd > 0 && price > 0) {
+    const rule = safeParse(pos.rule_json);
+    if (rule) {
+      const { pnlPct } = markPnl(pos.entry_price_usd, price, pos.notional_usd, pos.roundtrip_cost_pct);
+      const state = {
+        entry: pos.entry_price_usd, openTs: pos.open_ts,
+        peak: pos.peak_price_usd ?? pos.entry_price_usd,
+        mae: pos.trough_price_usd > 0 ? (pos.trough_price_usd / pos.entry_price_usd - 1) * 100 : 0,
+      };
+      const exit = evalRuleStep(state, { ts: now, price_usd: price, pnl_pct: pnlPct, price_state: metrics.priceState }, rule);
+      if (exit && exit.exitReason !== 'rug') {
+        if (store.paperSetRuleFired(pos.id, exit.exitReason, now)) {
+          pushAlert('规则触发', `🎯 <b>${posLabel(pos, cand)}</b> 退出规则触发：${exit.exitReason} @ ${spctInt(exit.exitPnlPct)}(建议按你的计划退出)`);
+        }
+      }
+    }
+  }
+  // 3) 风险告警：安全翻转(tradeSafety→REJECT)、深度骤降>50%(相对持有期峰值深度)
+  const rf = safeParse(pos.risk_flags_json) || { peakDepth: 0, fired: {} };
+  rf.fired = rf.fired || {};
+  const depth = metrics.depthUsd || 0;
+  if (depth > (rf.peakDepth || 0)) rf.peakDepth = depth;
+  let changed = false;
+  if (metrics.tradeSafety?.state === 'REJECT' && !rf.fired.safety_reject) {
+    fireRisk(pos, 'safety_reject', `⚠ <b>${posLabel(pos, cand)}</b> 安全状态翻转为「已否决」：${metrics.tradeSafety.reason || ''}`, now, rf);
+    changed = true;
+  }
+  if (rf.peakDepth > 0 && depth > 0 && depth < 0.5 * rf.peakDepth && !rf.fired.depth_drop) {
+    fireRisk(pos, 'depth_drop', `⚠ <b>${posLabel(pos, cand)}</b> 深度骤降>50%(峰值$${Math.round(rf.peakDepth)}→现$${Math.round(depth)})`, now, rf);
+    changed = true;
+  }
+  // 未来信号(dev 卖出/对倒软标)接入点：metrics.devSold / metrics.washFlags 落地后在此追加。
+  if (changed || depth > 0) store.paperSetRiskFlags(pos.id, JSON.stringify(rf));
+}
+// 触发一条风险告警并去重记录(rf 传入时写入 fired，未传时用 risk_flags_json 自维护——撤池路径)。
+function fireRisk(pos, flag, text, now, rf) {
+  const bag = rf || (safeParse(pos.risk_flags_json) || { peakDepth: 0, fired: {} });
+  bag.fired = bag.fired || {};
+  if (bag.fired[flag]) return;
+  bag.fired[flag] = now;
+  if (!rf) store.paperSetRiskFlags(pos.id, JSON.stringify(bag)); // rf 存在则由调用方统一持久化
+  pushAlert('风险告警', text);
+}
+function spctInt(v) { if (v == null) return '—'; const s = Math.round(+v) + '%'; return +v > 0 ? '+' + s : s; }
+
 // 轮询钩子：track.pollCandidate 在 maybeAlert 之后调用。用本轮实时 metrics 开新仓、重试延期仓、即时标记/平仓已有仓。
-export function onPoll(chain, row, metrics) {
-  if (cfg.enabled === false) return;
+export function onPoll(chain, row, metrics) {  if (cfg.enabled === false) return;
   try {
     const now = metrics?.now || Date.now();
     const state = metrics?.priceState ?? null;
@@ -242,6 +307,8 @@ export function onPoll(chain, row, metrics) {
         if (rugged) recordClose(pos, 0, 0, now, 'withdrawn', state); // 撤池立即记 −100%
         else if (!USER_GROUPS.has(pos.grp) && now >= pos.horizon_end_ts) recordClose(pos, metrics.priceUsd, metrics.marketCapUsd, now, 'horizon', state);
         else recordMark(pos, metrics.priceUsd, metrics.marketCapUsd, now, state); // 事件即时标记(用户仓不受 horizon 约束)
+        // 用户仓实时监控：规则触发 + 风险告警(用当轮 metrics)。放在标记/平仓之后，读到的是最新峰谷。
+        if (USER_GROUPS.has(pos.grp)) monitorUserPosition(store.paperGetById(pos.id), metrics, now, rugged);
       } else if (pos.status === 'deferred') {
         if (now >= pos.defer_until_ts) store.paperExpireDeferred(pos.id, now);
         else if (groups.has(pos.grp)) tryReopenDeferred(pos, metrics, now);
