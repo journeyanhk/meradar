@@ -1661,3 +1661,56 @@ test('前10买家净持仓集中度 SQL：净持仓、排除池/dev、top10 占�
   assert.equal(r2.holders, 4, 'A/B/POOL/DEV');
   assert.equal(r2.total, 1000, '70+30+500+400');
 });
+
+// —— 序B 报表纯函数：replayRule + bucketReturns —— //
+import { replayRule, bucketReturns } from '../src/paper.js';
+const T0 = 1_000_000;
+const mk = (min, price, pnl) => ({ ts: T0 + min * 60_000, price_usd: price, pnl_pct: pnl });
+
+test('replayRule：止损触发（跌破 -sl）', () => {
+  const r = replayRule([mk(0, 100, -2), mk(5, 65, -37)], { tp: 50, sl: 30, trail: null });
+  assert.equal(r.exitReason, 'sl');
+  assert.equal(r.exitPnlPct, -37, '退出取触发 mark 的 pnl_pct');
+});
+
+test('replayRule：止盈触发（涨到 +tp）', () => {
+  const r = replayRule([mk(0, 100, -2), mk(5, 160, 58)], { tp: 50, sl: 30 });
+  assert.equal(r.exitReason, 'tp');
+  assert.equal(r.exitPnlPct, 58);
+});
+
+test('replayRule：追踪止盈（自峰回撤 ≥ trail），MAE 相对入场价', () => {
+  const r = replayRule([mk(0, 100, -2), mk(2, 80, -22), mk(5, 200, 98), mk(10, 140, 38)], { tp: null, sl: null, trail: 25 });
+  assert.equal(r.exitReason, 'trail', '峰值200，跌到140=−30%≤−25%');
+  assert.equal(r.exitPnlPct, 38);
+  assert.ok(Math.abs(r.maePct - (-20)) < 1e-9, 'MAE=持有期相对入场最深回撤（曾跌到 80=−20%）');
+});
+
+test('replayRule：最长持有到期', () => {
+  const r = replayRule([mk(0, 100, -2), mk(300, 110, 8)], { tp: null, sl: null, trail: null, maxHoldMin: 240 });
+  assert.equal(r.exitReason, 'maxHold');
+  assert.equal(r.exitPnlPct, 8);
+});
+
+test('replayRule：全程不触发 → end（最后一个 mark）', () => {
+  const r = replayRule([mk(0, 100, -2), mk(5, 105, 3)], { tp: 50, sl: 30 });
+  assert.equal(r.exitReason, 'end');
+  assert.equal(r.exitPnlPct, 3);
+});
+
+test('bucketReturns：未平仓仓龄不足的桶为 null；取≤桶时刻最后一个 mark', () => {
+  const marks = [mk(0, 100, -2), mk(5, 110, 10), mk(60, 150, 50)];
+  const b = bucketReturns(marks, T0, 60 * 60_000, false, [5, 15, 60, 240]);
+  assert.equal(b[5], 10);
+  assert.equal(b[15], 10, '15min 桶取 5min 的 mark（60min mark 尚在未来）');
+  assert.equal(b[60], 50);
+  assert.equal(b[240], null, '未平仓且仓龄不足 240min → null');
+});
+
+test('bucketReturns：已平仓则终态收益向后传播（rug −100% 覆盖后续桶）', () => {
+  const marks = [mk(0, 100, -2), mk(10, 0.0001, -100)];
+  const b = bucketReturns(marks, T0, 10 * 60_000, true, [5, 15, 60]);
+  assert.equal(b[5], -2, '5min 时还没 rug');
+  assert.equal(b[15], -100, '已平：15min 桶取到平仓 mark');
+  assert.equal(b[60], -100, '终态向后传播');
+});

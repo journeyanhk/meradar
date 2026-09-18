@@ -274,6 +274,7 @@ setInterval(loadStats, 30000);
 const GROUP_LABEL = { baseline_seen: '对照(抽样)', tier_t1: 'T1', tier_t2: 'T2', entry_pass: '可试仓' };
 function pctOf(v) { return v == null ? '—' : (v * 100).toFixed(0) + '%'; }
 function spct(v) { if (v == null) return '—'; const s = Math.round(+v) + '%'; return +v > 0 ? '+' + s : s; }
+function scls(v) { return v == null ? '' : (+v > 0 ? 'pos' : +v < 0 ? 'neg' : ''); }
 async function loadPaper() {
   const body = document.getElementById('paperBody');
   const sub = document.getElementById('paperSub');
@@ -281,22 +282,66 @@ async function loadPaper() {
     const q = filters.chain && filters.chain !== 'all' ? `?chain=${encodeURIComponent(filters.chain)}` : '';
     const p = await fetch('/api/paper' + q).then((r) => r.json());
     const chainName = p.chain === 'all' ? '全部链' : (CHAIN_LABEL[p.chain] || p.chain);
-    sub.textContent = `${chainName} · 对照组抽样 1/${p.config.baselineSampleOneIn} · 基础往返成本 ${p.config.baseCostPct}%`;
-    const rows = Object.entries(p.groups).map(([g, s]) => `
+    sub.textContent = `${chainName} · 对照组抽样 1/${p.config.baselineSampleOneIn} · 基础往返成本 ${p.config.baseCostPct}% · horizon ${p.config.horizonHours}h`;
+    const entries = Object.entries(p.groups);
+    const bkts = p.config.bucketsMin || [5, 15, 60, 240, 1440];
+    const bLabel = (b) => b >= 1440 ? (b / 1440) + 'd' : b >= 60 ? (b / 60) + 'h' : b + 'm';
+
+    // 表1：状态汇总 + 已平统计
+    const summ = entries.map(([g, s]) => `
       <tr>
         <td>${GROUP_LABEL[g] || g}</td>
-        <td>${s.open}</td>
-        <td>${s.closed}</td>
-        <td>${s.deferred}/${s.skipped}</td>
-        <td class="${s.medianPnlPct > 0 ? 'pos' : s.medianPnlPct < 0 ? 'neg' : ''}">${spct(s.medianPnlPct)}</td>
+        <td>${s.open}</td><td>${s.closed}</td><td>${s.deferred}/${s.deferred_expired}/${s.skipped}</td>
+        <td class="${scls(s.medianPnlPct)}">${spct(s.medianPnlPct)}</td>
         <td>${pctOf(s.winRate)}</td>
         <td class="${s.rugRate > 0 ? 'neg' : ''}">${pctOf(s.rugRate)}</td>
         <td>${s.avgMfePct == null ? '—' : '+' + Math.round(+s.avgMfePct) + '%'}</td>
         <td>${pctOf(s.hit2xRate)}</td>
       </tr>`).join('');
-    body.innerHTML = `<table class="paper-tbl">
-      <thead><tr><th>组</th><th>持仓</th><th>已平</th><th>延/跳</th><th>中位</th><th>胜率</th><th>Rug</th><th>MFE均</th><th>2×率</th></tr></thead>
-      <tbody>${rows}</tbody></table>`;
+
+    // 表2：未平仓现值(不等平仓，1 小时就有数)
+    const openRows = entries.map(([g, s]) => {
+      const o = s.open || {};
+      return `<tr>
+        <td>${GROUP_LABEL[g] || g}</td>
+        <td>${o.openCount ?? 0}</td>
+        <td class="${scls(o.medianCurPct)}">${spct(o.medianCurPct)}</td>
+        <td>${o.medianMfePct == null ? '—' : spct(o.medianMfePct)}</td>
+        <td>${pctOf(o.hit15xRate)}</td>
+        <td>${pctOf(o.hit2xRate)}</td>
+        <td class="${o.dd50Rate > 0 ? 'neg' : ''}">${pctOf(o.dd50Rate)}</td>
+      </tr>`; }).join('');
+
+    // 表3：分时收益中位(开仓后 N 时刻此刻退出的净收益)
+    const bktHead = bkts.map((b) => `<th>${bLabel(b)}</th>`).join('');
+    const bktRows = entries.map(([g, s]) => {
+      const tb = s.timeBuckets || {};
+      const cells = bkts.map((b) => { const x = tb[b]; return `<td class="${scls(x && x.median)}">${x && x.n ? spct(x.median) : '—'}</td>`; }).join('');
+      return `<tr><td>${GROUP_LABEL[g] || g}</td>${cells}</tr>`; }).join('');
+
+    // 表4：退出规则回放(哪套退出规则把 MFE 变成实现收益)
+    const ruleNames = p.config.ruleNames || [];
+    const ruleBlocks = entries.map(([g, s]) => {
+      const rr = (s.rules || []).map((r) => `<tr>
+        <td>${r.name}</td><td>${r.n}</td>
+        <td class="${scls(r.medianPnlPct)}">${spct(r.medianPnlPct)}</td>
+        <td class="${scls(r.avgPnlPct)}">${spct(r.avgPnlPct)}</td>
+        <td>${pctOf(r.winRate)}</td>
+        <td class="neg">${spct(r.avgMaePct)}</td>
+      </tr>`).join('');
+      return `<div class="paper-rule-grp"><div class="paper-rule-title">${GROUP_LABEL[g] || g}</div>
+        <table class="paper-tbl"><thead><tr><th>规则</th><th>样本</th><th>中位</th><th>均值</th><th>胜率</th><th>MAE均</th></tr></thead><tbody>${rr}</tbody></table></div>`;
+    }).join('');
+
+    body.innerHTML = `
+      <div class="paper-sec-t">状态与已平仓</div>
+      <table class="paper-tbl"><thead><tr><th>组</th><th>持仓</th><th>已平</th><th>延/过期/跳</th><th>中位</th><th>胜率</th><th>Rug</th><th>MFE均</th><th>2×率</th></tr></thead><tbody>${summ}</tbody></table>
+      <div class="paper-sec-t">未平仓现值（无需等 24h）</div>
+      <table class="paper-tbl"><thead><tr><th>组</th><th>持仓</th><th>现值中位</th><th>MFE中位</th><th>1.5×率</th><th>2×率</th><th>回撤&gt;50%</th></tr></thead><tbody>${openRows}</tbody></table>
+      <div class="paper-sec-t">分时收益中位（开仓后 · 此刻退出净值）</div>
+      <table class="paper-tbl"><thead><tr><th>组</th>${bktHead}</tr></thead><tbody>${bktRows}</tbody></table>
+      <div class="paper-sec-t">退出规则回放（把 MFE 变实现收益）</div>
+      ${ruleBlocks}`;
   } catch { body.textContent = '加载失败'; }
 }
 document.getElementById('paperBtn').addEventListener('click', () => { document.getElementById('paperOverlay').hidden = false; loadPaper(); });

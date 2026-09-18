@@ -136,3 +136,7 @@ body {
 .paper-tbl th { color: var(--muted); font-weight: 500; font-size: 12px; }
 .paper-tbl td.pos { color: var(--ok); font-weight: 600; }
 .paper-tbl td.neg { color: var(--t2); font-weight: 600; }
+.paper-sec-t { margin: 14px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: .02em; }
+.paper-sec-t:first-child { margin-top: 0; }
+.paper-rule-grp { margin-bottom: 10px; }
+.paper-rule-title { font-size: 12px; font-weight: 600; margin: 4px 0 2px; }

@@ -577,6 +577,18 @@ const stmt = {
   paperClosedPnlsByChain: db.prepare(`SELECT pnl_pct, (close_ts - open_ts) AS hold_ms, entry_price_usd, peak_price_usd, trough_price_usd, close_reason FROM paper_positions WHERE grp=? AND chain=? AND status='closed'`),
   // 已平仓>N 天的仓位其 marks 清理(仓位行永久保留，只删明细行控 DB 体积)。open/deferred 的 marks 绝不删。
   paperDeleteClosedMarks: db.prepare(`DELETE FROM paper_marks WHERE position_id IN (SELECT id FROM paper_positions WHERE status='closed' AND close_ts < ?)`),
+  // 序B 报表：已开仓(open+closed，均有 open_ts)的仓位轨迹字段，供未平仓现值 + 分时 + 规则回放。
+  paperStatPositions: db.prepare(`
+    SELECT id, status, open_ts, close_ts, entry_price_usd, roundtrip_cost_pct, notional_usd,
+      peak_price_usd, trough_price_usd, last_price_usd, last_mark_ts
+    FROM paper_positions
+    WHERE grp=@grp AND (@chain IS NULL OR chain=@chain) AND open_ts IS NOT NULL`),
+  // 某组全部 marks(join 仓位取 grp/chain)，按仓位+时间升序，调用方按 position_id 分组。
+  paperMarksForGrp: db.prepare(`
+    SELECT m.position_id, m.ts, m.price_usd, m.pnl_pct
+    FROM paper_marks m JOIN paper_positions p ON p.id = m.position_id
+    WHERE p.grp=@grp AND (@chain IS NULL OR p.chain=@chain)
+    ORDER BY m.position_id, m.ts`),
 };
 
 // buyerProfilesForAccounts 的 IN(...) prepared statement 按占位符个数缓存(节点 sqlite 需固定 SQL)。
@@ -826,6 +838,8 @@ export const store = {
   paperAddMark(m) { stmt.paperInsertMark.run({ price_state: null, ...m }); },
   paperStatusCounts(chain = null) { return chain ? stmt.paperStatusCountsByChain.all(chain) : stmt.paperStatusCounts.all(); },
   paperClosedPnls(grp, chain = null) { return chain ? stmt.paperClosedPnlsByChain.all(grp, chain) : stmt.paperClosedPnls.all(grp); },
+  paperStatPositions(grp, chain = null) { return stmt.paperStatPositions.all({ grp, chain }); },
+  paperMarksForGrp(grp, chain = null) { return stmt.paperMarksForGrp.all({ grp, chain }); },
   // 已平仓>beforeMs 的仓位其 marks 清理(仓位行永久保留)。
   purgePaperMarks(beforeMs) { return stmt.paperDeleteClosedMarks.run(beforeMs).changes; },
 };

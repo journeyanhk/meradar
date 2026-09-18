@@ -12,6 +12,14 @@ const cfg = config.paper || {};
 const RANK = { T0: 0, T1: 1, T2: 2, T3: 3 };
 const HOUR = 3600_000;
 
+// 序B 报表预设：分时桶(分钟) + 三套退出规则(供回放对比)。可被 config.paper.timeBucketsMin/rules 覆盖。
+const BUCKETS_MIN = cfg.timeBucketsMin ?? [5, 15, 60, 240, 1440];
+const RULES = cfg.rules ?? [
+  { name: 'tp50/sl30/追踪25', tp: 50, sl: 30, trail: 25, maxHoldMin: null },
+  { name: 'tp100/sl50', tp: 100, sl: 50, trail: null, maxHoldMin: null },
+  { name: '追踪30/持有4h', tp: null, sl: null, trail: 30, maxHoldMin: 240 },
+];
+
 // —— 纯函数(可单测) ——
 
 // baseline 抽样：对照组只取全体的 1/oneIn(默认 20%)，把标记量降一个量级。
@@ -59,6 +67,67 @@ export function groupsFor(row, metrics) {
   if (rank >= 2) g.push('tier_t2');
   if (metrics.entry?.ok) g.push('entry_pass');
   return g;
+}
+
+// —— 序B 报表纯函数(可单测)：不等平仓，用轨迹出实时结论 ——
+
+// 分时收益：给定该仓 marks(ts 升序，marks[0]=开仓 t0) + open_ts，取每个桶「≤该桶时刻的最后一个 mark」
+// 的 pnl_pct(已扣往返=此刻退出净收益)。未平仓且仓龄不足该桶 → null(不计入，避免用当前值冒充未来)。
+export function bucketReturns(marks, openTs, ageMs, isClosed, bucketsMin) {
+  const pts = marks || [];
+  const out = {};
+  for (const b of bucketsMin) {
+    const cutoffMs = b * 60000;
+    if (!isClosed && cutoffMs > ageMs) { out[b] = null; continue; }
+    let val = null;
+    for (const m of pts) { if (m.ts - openTs <= cutoffMs) val = m.pnl_pct; else break; }
+    out[b] = val;
+  }
+  return out;
+}
+
+// 退出规则回放：按 marks(ts 升序) 模拟一套 {tp,sl,trail,maxHoldMin}(百分比/分钟，null=不启用)。
+// 每 mark 检查序：止损 → 追踪回撤 → 止盈 → 最长持有；都不触发则持有到最后一个 mark(reason='end')。
+// 退出收益取触发 mark 的 pnl_pct(已扣往返)。maePct=持有期内相对入场价的最深回撤(%)。价格判定用 price_usd/entry。
+export function replayRule(marks, rule = {}) {
+  const pts = (marks || []).filter((m) => m.price_usd > 0);
+  if (!pts.length) return null;
+  const entry = pts[0].price_usd;
+  const openTs = pts[0].ts;
+  const { tp = null, sl = null, trail = null, maxHoldMin = null } = rule;
+  let peak = entry;
+  let mae = 0;
+  const finish = (m, reason) => ({ exitPnlPct: m.pnl_pct, exitReason: reason, maePct: mae, holdMin: (m.ts - openTs) / 60000 });
+  for (const m of pts) {
+    const p = m.price_usd;
+    const ret = (p / entry - 1) * 100;
+    if (ret < mae) mae = ret;
+    if (p > peak) peak = p;
+    if (sl != null && ret <= -sl) return finish(m, 'sl');
+    if (trail != null && peak > entry && (p / peak - 1) * 100 <= -trail) return finish(m, 'trail');
+    if (tp != null && ret >= tp) return finish(m, 'tp');
+    if (maxHoldMin != null && (m.ts - openTs) / 60000 >= maxHoldMin) return finish(m, 'maxHold');
+  }
+  return finish(pts[pts.length - 1], 'end');
+}
+
+// 未平仓现值统计(纯聚合)：现值收益中位、MFE 中位、1.5×/2× 命中率、当前自峰回撤>50% 占比。
+// 用仓位上已存的 entry/peak/last，无需回扫 marks。
+export function openPositionStats(rows) {
+  const r = rows.filter((x) => x.entry_price_usd > 0);
+  const cur = r.filter((x) => x.last_price_usd != null).map((x) => (x.last_price_usd / x.entry_price_usd - 1) * 100);
+  const mfe = r.filter((x) => x.peak_price_usd != null).map((x) => (x.peak_price_usd / x.entry_price_usd - 1) * 100);
+  const n = r.length;
+  const hit = (mult) => r.filter((x) => x.peak_price_usd != null && x.peak_price_usd / x.entry_price_usd >= mult).length;
+  const dd50 = r.filter((x) => x.peak_price_usd > 0 && x.last_price_usd != null && (x.last_price_usd / x.peak_price_usd - 1) <= -0.5).length;
+  return {
+    openCount: rows.length,
+    medianCurPct: cur.length ? median(cur) : null,
+    medianMfePct: mfe.length ? median(mfe) : null,
+    hit15xRate: n ? hit(1.5) / n : null,
+    hit2xRate: n ? hit(2) / n : null,
+    dd50Rate: n ? dd50 / n : null,
+  };
 }
 
 // —— 编排(有副作用) ——
@@ -212,6 +281,13 @@ function median(a) {
   const m = s.length >> 1;
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
+function quantile(a, q) {
+  if (!a.length) return null;
+  const s = [...a].sort((x, y) => x - y);
+  const pos = (s.length - 1) * q;
+  const lo = Math.floor(pos), hi = Math.ceil(pos);
+  return lo === hi ? s[lo] : s[lo] + (s[hi] - s[lo]) * (pos - lo);
+}
 
 export function paperStats(chain = null) {
   const groups = ['baseline_seen', 'tier_t1', 'tier_t2', 'entry_pass'];
@@ -228,6 +304,47 @@ export function paperStats(chain = null) {
     const mae = closed.filter((r) => r.entry_price_usd > 0 && r.trough_price_usd != null).map((r) => (r.trough_price_usd / r.entry_price_usd - 1) * 100);
     const hit2x = closed.filter((r) => r.entry_price_usd > 0 && r.peak_price_usd != null && r.peak_price_usd / r.entry_price_usd >= 2).length;
     const rugged = closed.filter((r) => r.close_reason === 'withdrawn').length;
+
+    // —— 序B：未平仓现值 + 分时收益 + 退出规则回放(纯读轨迹) ——
+    const positions = store.paperStatPositions(g, chain);
+    const now = Date.now();
+    const openRows = positions.filter((r) => r.status === 'open');
+    const open = openPositionStats(openRows);
+    // marks 按仓位分组
+    const marksByPos = new Map();
+    for (const m of store.paperMarksForGrp(g, chain)) {
+      if (!marksByPos.has(m.position_id)) marksByPos.set(m.position_id, []);
+      marksByPos.get(m.position_id).push(m);
+    }
+    // 分时桶累积 + 规则回放累积
+    const bucketVals = Object.fromEntries(BUCKETS_MIN.map((b) => [b, []]));
+    const ruleOut = RULES.map((r) => ({ name: r.name, pnls: [], maes: [] }));
+    for (const pos of positions) {
+      const marks = marksByPos.get(pos.id);
+      if (!marks || !marks.length || !(pos.entry_price_usd > 0)) continue;
+      const isClosed = pos.status === 'closed';
+      const ageMs = (isClosed ? pos.close_ts : (pos.last_mark_ts || now)) - pos.open_ts;
+      const br = bucketReturns(marks, pos.open_ts, ageMs, isClosed, BUCKETS_MIN);
+      for (const b of BUCKETS_MIN) if (br[b] != null) bucketVals[b].push(br[b]);
+      RULES.forEach((rule, i) => {
+        const res = replayRule(marks, rule);
+        if (res) { ruleOut[i].pnls.push(res.exitPnlPct); ruleOut[i].maes.push(res.maePct); }
+      });
+    }
+    const timeBuckets = {};
+    for (const b of BUCKETS_MIN) {
+      const v = bucketVals[b];
+      timeBuckets[b] = v.length ? { n: v.length, median: median(v), p25: quantile(v, 0.25), p75: quantile(v, 0.75) } : { n: 0, median: null, p25: null, p75: null };
+    }
+    const rules = ruleOut.map((r) => ({
+      name: r.name,
+      n: r.pnls.length,
+      avgPnlPct: r.pnls.length ? avg(r.pnls) : null,
+      medianPnlPct: r.pnls.length ? median(r.pnls) : null,
+      winRate: r.pnls.length ? r.pnls.filter((v) => v > 0).length / r.pnls.length : null,
+      avgMaePct: r.maes.length ? avg(r.maes) : null,
+    }));
+
     out[g] = {
       ...byGrp[g],
       closedCount: pnls.length,
@@ -240,11 +357,14 @@ export function paperStats(chain = null) {
       avgMfePct: mfe.length ? avg(mfe) : null,
       medianMaePct: mae.length ? median(mae) : null,
       hit2xRate: pnls.length ? hit2x / pnls.length : null,
+      open,
+      timeBuckets,
+      rules,
     };
   }
   return {
     chain: chain || 'all',
-    config: { notionalUsd: cfg.notionalUsd ?? 100, horizonHours: cfg.horizonHours ?? 24, baseCostPct: cfg.baseCostPct ?? 2, baselineSampleOneIn: cfg.baselineSampleOneIn ?? 5 },
+    config: { notionalUsd: cfg.notionalUsd ?? 100, horizonHours: cfg.horizonHours ?? 24, baseCostPct: cfg.baseCostPct ?? 2, baselineSampleOneIn: cfg.baselineSampleOneIn ?? 5, bucketsMin: BUCKETS_MIN, ruleNames: RULES.map((r) => r.name) },
     groups: out,
   };
 }
