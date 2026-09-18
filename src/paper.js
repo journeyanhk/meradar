@@ -199,6 +199,14 @@ function tryReopenDeferred(pos, metrics, now) {
 // last_mark_ts 记「上次落行时刻」：持续跳过 → 到 markDedupWindowSec 后自动补一行心跳，曲线不至于全空。
 function recordMark(pos, price, mcap, now, state) {
   if (!(price > 0)) return;
+  // 关注仓可能在暂无价时以 entry=0 开仓；首个有效价到达时懒回填入场价(否则 markPnl 会除以 0 得 NaN)。
+  // 回填后本次即以该价为入场基线(pnl≈−往返成本)，等价于「此刻才建仓」，不虚构历史盈亏。
+  if (!(pos.entry_price_usd > 0)) {
+    store.paperSetEntry(pos.id, { entry_price_usd: price, entry_mcap_usd: mcap ?? null });
+    pos.entry_price_usd = price;
+    pos.peak_price_usd = price;
+    pos.trough_price_usd = price;
+  }
   const peak = Math.max(pos.peak_price_usd ?? price, price);
   const trough = Math.min(pos.trough_price_usd ?? price, price);
   const sinceRow = pos.last_mark_ts ? now - pos.last_mark_ts : Infinity;
@@ -372,25 +380,30 @@ export function openUserPosition(key, origin, opts = {}) {
   if (!cand) return { ok: false, error: `未找到候选 ${key}` };
   const now = Date.now();
   const entry = opts.entryPriceUsd != null && Number(opts.entryPriceUsd) > 0 ? Number(opts.entryPriceUsd) : cand.price_usd;
-  if (!(entry > 0)) return { ok: false, error: '当前无有效价格，无法开仓(可传 entryPriceUsd 指定入场价)' };
+  // 关注仓=纯观察，允许暂无价开仓(unknown/未定价)，入场价记 0，待首个有效价到达时懒回填(见 recordMark)。
+  // 手动模拟/实盘=需要入场价才能算盈亏，无有效价则明确报错(可传 entryPriceUsd 指定)。
+  if (!(entry > 0) && origin !== 'watch') {
+    return { ok: false, error: '当前无有效价格，无法开仓(可传 entryPriceUsd 指定入场价，或先用「关注」追踪)' };
+  }
+  const entryPrice = entry > 0 ? entry : 0;
   const rule = sanitizeRule(opts.rule);
   const rtCost = origin === 'real' ? 0 : (cfg.baseCostPct ?? 2); // 实盘按真实成交，往返成本记 0；模拟/关注含基础成本
   const notional = opts.notionalUsd != null && Number(opts.notionalUsd) > 0 ? Number(opts.notionalUsd)
-    : (opts.qty != null && Number(opts.qty) > 0 ? Number(opts.qty) * entry : (cfg.notionalUsd ?? 100));
+    : (opts.qty != null && Number(opts.qty) > 0 ? Number(opts.qty) * entryPrice : (cfg.notionalUsd ?? 100));
   const created = store.paperUserOpen({
     key, chain: cand.chain, grp: origin, origin,
-    signal_ts: now, open_ts: now, entry_price_usd: entry, entry_mcap_usd: cand.market_cap_usd ?? null,
+    signal_ts: now, open_ts: now, entry_price_usd: entryPrice, entry_mcap_usd: entryPrice > 0 ? (cand.market_cap_usd ?? null) : null,
     notional_usd: notional, qty: opts.qty != null && Number(opts.qty) > 0 ? Number(opts.qty) : null,
     roundtrip_cost_pct: rtCost, horizon_end_ts: null, // 用户仓无 horizon 自动平仓
     rule_json: rule ? JSON.stringify(rule) : null, notes: opts.notes || null,
   });
   if (!created) return { ok: false, error: `该币已存在 ${origin} 仓(先平仓再重开)` };
   const pos = store.paperPositionByKeyOrigin(key, origin);
-  if (pos) {
-    const { pnlUsd, pnlPct } = markPnl(entry, entry, notional, rtCost);
-    store.paperAddMark({ position_id: pos.id, ts: now, price_usd: entry, mcap_usd: cand.market_cap_usd ?? null, pnl_usd: pnlUsd, pnl_pct: pnlPct, price_state: 'ok' });
+  if (pos && entryPrice > 0) {
+    const { pnlUsd, pnlPct } = markPnl(entryPrice, entryPrice, notional, rtCost);
+    store.paperAddMark({ position_id: pos.id, ts: now, price_usd: entryPrice, mcap_usd: cand.market_cap_usd ?? null, pnl_usd: pnlUsd, pnl_pct: pnlPct, price_state: 'ok' });
   }
-  log.info({ key, origin, entry, notional }, '用户仓已开');
+  log.info({ key, origin, entry: entryPrice, notional }, '用户仓已开');
   return { ok: true, position: pos };
 }
 

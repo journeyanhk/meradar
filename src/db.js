@@ -599,6 +599,11 @@ const stmt = {
     UPDATE paper_positions SET last_price_usd=@last_price_usd, last_mcap_usd=@last_mcap_usd,
       peak_price_usd=@peak_price_usd, trough_price_usd=@trough_price_usd WHERE id=@id
   `),
+  // 序C：关注仓开仓时若暂无价(unknown)，entry 记 0；首个有效价到达时回填入场价与峰谷基准(懒初始化)。
+  paperSetEntry: db.prepare(`
+    UPDATE paper_positions SET entry_price_usd=@entry_price_usd, entry_mcap_usd=@entry_mcap_usd,
+      peak_price_usd=@entry_price_usd, trough_price_usd=@entry_price_usd WHERE id=@id AND (entry_price_usd IS NULL OR entry_price_usd<=0)
+  `),
   paperClosePosition: db.prepare(`
     UPDATE paper_positions SET status='closed', close_ts=@close_ts, close_price_usd=@close_price_usd, close_mcap_usd=@close_mcap_usd,
       close_reason=@close_reason, pnl_usd=@pnl_usd, pnl_pct=@pnl_pct,
@@ -915,6 +920,7 @@ export const store = {
   paperExpireDeferred(id, now) { stmt.paperExpireDeferred.run({ id, now }); },
   paperUpdateMark(id, f) { stmt.paperUpdateMark.run({ id, ...f }); },
   paperUpdatePeak(id, f) { stmt.paperUpdatePeak.run({ id, ...f }); },
+  paperSetEntry(id, f) { return stmt.paperSetEntry.run({ id, ...f }).changes; },
   paperClose(id, f) { return stmt.paperClosePosition.run({ id, ...f }).changes > 0; },
   paperAddMark(m) { stmt.paperInsertMark.run({ price_state: null, ...m }); },
   paperStatusCounts(chain = null) { return chain ? stmt.paperStatusCountsByChain.all(chain) : stmt.paperStatusCounts.all(); },
