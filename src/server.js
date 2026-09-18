@@ -158,8 +158,17 @@ export async function startServer() {
   app.get('/api/paper', async (req) => paperStats(req.query?.chain || null));
 
   // 序C：用户仓(手动模拟/实盘记录/关注)——只读追踪，绝不触发链上交易。
+  // 写接口保护：配置 PAPER_WRITE_TOKEN 后，三条 POST 需带匹配的 x-paper-token 头(防公网面板被任意开仓刷告警)；未配=开放。
+  const paperWriteGuard = (req, reply) => {
+    const need = config.paperWriteToken;
+    if (!need) return true;                                  // 未配置 → 开放(默认，零回归)
+    if (req.headers['x-paper-token'] === need) return true;
+    reply.code(401).send({ error: '写接口需要有效的 x-paper-token' });
+    return false;
+  };
   // POST /api/paper/position { key, origin(manual|real|watch), notionalUsd?, qty?, entryPriceUsd?, rule?, notes? }
   app.post('/api/paper/position', async (req, reply) => {
+    if (!paperWriteGuard(req, reply)) return;
     const b = req.body || {};
     if (!b.key || !b.origin) return reply.code(400).send({ error: '缺少 key 或 origin' });
     const r = openUserPosition(String(b.key), String(b.origin), {
@@ -170,6 +179,7 @@ export async function startServer() {
   });
   // POST /api/paper/position/close { key, origin }
   app.post('/api/paper/position/close', async (req, reply) => {
+    if (!paperWriteGuard(req, reply)) return;
     const b = req.body || {};
     if (!b.key || !b.origin) return reply.code(400).send({ error: '缺少 key 或 origin' });
     const r = closeUserPosition(String(b.key), String(b.origin));
@@ -178,6 +188,7 @@ export async function startServer() {
   });
   // POST /api/paper/position/rule { key, origin, rule:{tp,sl,trail,maxHoldMin} }
   app.post('/api/paper/position/rule', async (req, reply) => {
+    if (!paperWriteGuard(req, reply)) return;
     const b = req.body || {};
     if (!b.key || !b.origin) return reply.code(400).send({ error: '缺少 key 或 origin' });
     const r = bindRuleToPosition(String(b.key), String(b.origin), b.rule);

@@ -384,6 +384,7 @@ export async function pollCandidate(chain, cand) {
       metrics.softFlags = softFlags;
       const score = scoreToken(buildScoreInput(metrics));
       const prevScore = store.lastScore(cand.key);
+      metrics.prevScore = prevScore;   // 撤离告警按「曾健康→恶化」判定，须用落库前的上一条分
       const vetoFlip = JSON.stringify(prevScore?.vetoes || []) !== JSON.stringify(score.vetoes || []);
       const changed = !prevScore || vetoFlip
         || Math.abs((prevScore.total ?? 0) - score.total) >= 10

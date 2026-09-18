@@ -56,6 +56,8 @@ export const config = {
   },
   // 序D 评分卡 v0 心跳落库间隔(ms)：距上条 score_history ≥ 该值即补一条(另有 首评/变动≥10/否决翻转 触发)。
   scoreHistoryIntervalMs: Number(env('SCORE_HISTORY_INTERVAL_MS', String(5 * 60_000))),
+  // 序C 面板写接口保护：设置后三条 POST /api/paper/position* 需带匹配的 x-paper-token 头；未设=开放(默认，零回归)。
+  paperWriteToken: env('PAPER_WRITE_TOKEN') || null,
   ...file,
 };
 

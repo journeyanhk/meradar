@@ -140,17 +140,23 @@ export async function maybeExitAlert(chain, cand, metrics, now = Date.now()) {
   const tier = cand.tier || 'T0';
   if (RANK[tier] < RANK.T2 && !metrics.entry?.ok) return false;   // 只盯正在关注的币
   const hasVeto = (s.vetoes?.length || 0) > 0;
-  const trigger = hasVeto || s.total < 45 || s.S < 50;
-  if (!trigger) return false;
 
   const vetoesKey = hasVeto ? [...s.vetoes].sort().join('|') : '';
-  const prev = exitAlertState.get(cand.key);
-  const vetoFlip = hasVeto && (!prev || prev.vetoes !== vetoesKey);
-  if (!vetoFlip && prev && (now - prev.ts) < EXIT_RL_MS) return false;  // 非翻转则限速
+  const prevAlert = exitAlertState.get(cand.key);
+  const vetoFlip = hasVeto && (!prevAlert || prevAlert.vetoes !== vetoesKey);
+
+  // 分数型撤离只在「曾健康 → 现不健康」时发(否则首评就低的币会与 T2 告警同分钟收到一条撤离，语义矛盾)。
+  // 「曾健康」= 上一条 score_history 总分≥45 且 S≥50 且无否决。否决翻转永远即时、不受此约束。
+  const prev = metrics.prevScore;
+  const wasHealthy = prev && prev.total >= 45 && prev.S >= 50 && !(prev.vetoes?.length);
+  const scoreDrop = wasHealthy && (s.total < 45 || s.S < 50);
+  const trigger = vetoFlip || scoreDrop;
+  if (!trigger) return false;
+  if (!vetoFlip && prevAlert && (now - prevAlert.ts) < EXIT_RL_MS) return false;  // 非翻转则 30min 限速
   exitAlertState.set(cand.key, { ts: now, vetoes: vetoesKey });
 
   const why = hasVeto ? `否决:${s.vetoes.slice(0, 2).join('/')}`
-    : (s.S < 50 ? `安全分${s.S}偏低` : `总分${s.total}偏低`);
+    : (s.S < 50 ? `安全分 ${prev.S}→${s.S} 跌破50` : `总分 ${prev.total}→${s.total} 跌破45`);
   const chainTag = CHAIN_TAG[chain] || chain;
   const links = linksFor(chain, cand);
   const linkline = Object.entries(links).map(([k, v]) => `<a href="${v}">${k}</a>`).join(' · ');

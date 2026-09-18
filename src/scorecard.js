@@ -137,8 +137,8 @@ export function scoreToken(input = {}) {
   const O = Math.round((liq.pts + flow.pts + community.pts) / 50 * 100);
   let total = Math.round(0.6 * S + 0.4 * O);
   let capped = null;
-  if (safety.gaps.length >= 2) { total = Math.min(total, 70); capped = '安全缺≥2项·封顶70'; }
-  if (uniqVetoes.length) { total = Math.min(total, 30); capped = '否决·封顶30'; }
+  if (safety.gaps.length >= 2) { total = Math.min(total, 70); capped = '封顶70·安全维度未知≥2项'; }
+  if (uniqVetoes.length) { total = Math.min(total, 30); capped = `封顶30·否决:${uniqVetoes.slice(0, 2).join('/')}`; }
 
   return {
     version: SCORE_VERSION, S, O, total, capped,

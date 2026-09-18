@@ -372,8 +372,17 @@ async function loadPaper() {
 }
 // 序C：卡片仓位按钮(事件委托) —— 开手动/关注/实盘仓，只读追踪，绝不触发链上交易。
 async function apiPost(url, body) {
-  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const headers = { 'content-type': 'application/json' };
+  // 写接口令牌(可选)：若后端配了 PAPER_WRITE_TOKEN，需在此填一次(存 localStorage)。未配则留空即可。
+  const tok = localStorage.getItem('paperToken');
+  if (tok) headers['x-paper-token'] = tok;
+  const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
+  if (r.status === 401) {
+    const t = prompt('此面板已启用写保护，请输入写接口令牌（x-paper-token）：');
+    if (t) { localStorage.setItem('paperToken', t.trim()); return apiPost(url, body); }
+    throw new Error('需要写接口令牌');
+  }
   if (!r.ok) throw new Error(j.error || '请求失败');
   return j;
 }

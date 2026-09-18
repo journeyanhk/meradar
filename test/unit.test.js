@@ -1788,18 +1788,18 @@ test('scoreToken：全空输入 → 全维度记「中(0.4)」，S/O 各 40，�
   // 0.6*40+0.4*40=40，未触封顶阈值(≤70)
   assert.equal(r.total, 40);
   assert.ok(r.gaps.length >= 2, '大量未知项进入 gaps');
-  assert.equal(r.capped, '安全缺≥2项·封顶70');
+  assert.equal(r.capped, '封顶70·安全维度未知≥2项');
 });
 test('scoreToken：蜜罐 REJECT → 否决封顶30', () => {
   const r = scoreToken({ safety: { state: 'REJECT' } });
   assert.ok(r.vetoes.includes('蜜罐/已否决'));
   assert.ok(r.total <= 30);
-  assert.equal(r.capped, '否决·封顶30');
+  assert.ok(r.capped.startsWith('封顶30·否决'));
 });
 test('scoreToken：卖税≥30% → 否决；卖税档位低优折算', () => {
   assert.ok(scoreToken({ safety: { state: 'PASS', sellTaxBps: 3000 } }).vetoes.includes('卖税≥30%(蜜罐)'));
   const mid = scoreToken({ safety: { state: 'PASS', sellTaxBps: 800 } });
-  assert.equal(mid.capped, '安全缺≥2项·封顶70', '仅卖税一项已核验，lp/proxy 仍未知→2 gap');
+  assert.equal(mid.capped, '封顶70·安全维度未知≥2项', '仅卖税一项已核验，lp/proxy 仍未知→2 gap');
 });
 test('scoreToken：前10>50% 与 dev>20% 触发否决封顶30', () => {
   assert.ok(scoreToken({ chips: { top10Pct: 60 } }).vetoes.includes('前10持仓>50%(极端集中)'));
