@@ -312,25 +312,25 @@ async function loadPaper() {
         <td class="${o.dd50Rate > 0 ? 'neg' : ''}">${pctOf(o.dd50Rate)}</td>
       </tr>`; }).join('');
 
-    // 表3：分时收益中位(开仓后 N 时刻此刻退出的净收益)
+    // 表3：分时收益中位(开仓后 N 时刻此刻退出的净收益)；带样本数 n，防小样本被当结论
     const bktHead = bkts.map((b) => `<th>${bLabel(b)}</th>`).join('');
     const bktRows = entries.map(([g, s]) => {
       const tb = s.timeBuckets || {};
-      const cells = bkts.map((b) => { const x = tb[b]; return `<td class="${scls(x && x.median)}">${x && x.n ? spct(x.median) : '—'}</td>`; }).join('');
+      const cells = bkts.map((b) => { const x = tb[b]; return `<td class="${scls(x && x.median)}" title="样本 ${x ? x.n : 0}">${x && x.n ? spct(x.median) + `<span class="paper-n">·${x.n}</span>` : '—'}</td>`; }).join('');
       return `<tr><td>${GROUP_LABEL[g] || g}</td>${cells}</tr>`; }).join('');
 
-    // 表4：退出规则回放(哪套退出规则把 MFE 变成实现收益)
-    const ruleNames = p.config.ruleNames || [];
+    // 表4：退出规则回放(哪套退出规则把 MFE 变成实现收益)；rug 率单列，样本区分已平/未平
     const ruleBlocks = entries.map(([g, s]) => {
       const rr = (s.rules || []).map((r) => `<tr>
-        <td>${r.name}</td><td>${r.n}</td>
+        <td>${r.name}</td><td title="已平 ${r.nClosed} / 未平 ${r.nOpen}">${r.nClosed}/${r.nOpen}</td>
         <td class="${scls(r.medianPnlPct)}">${spct(r.medianPnlPct)}</td>
         <td class="${scls(r.avgPnlPct)}">${spct(r.avgPnlPct)}</td>
         <td>${pctOf(r.winRate)}</td>
+        <td class="${r.rugRate > 0 ? 'neg' : ''}">${pctOf(r.rugRate)}</td>
         <td class="neg">${spct(r.avgMaePct)}</td>
       </tr>`).join('');
       return `<div class="paper-rule-grp"><div class="paper-rule-title">${GROUP_LABEL[g] || g}</div>
-        <table class="paper-tbl"><thead><tr><th>规则</th><th>样本</th><th>中位</th><th>均值</th><th>胜率</th><th>MAE均</th></tr></thead><tbody>${rr}</tbody></table></div>`;
+        <table class="paper-tbl"><thead><tr><th>规则</th><th>已平/未平</th><th>中位</th><th>均值</th><th>胜率</th><th>Rug</th><th>MAE均</th></tr></thead><tbody>${rr}</tbody></table></div>`;
     }).join('');
 
     body.innerHTML = `

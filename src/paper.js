@@ -90,7 +90,8 @@ export function bucketReturns(marks, openTs, ageMs, isClosed, bucketsMin) {
 // 每 mark 检查序：止损 → 追踪回撤 → 止盈 → 最长持有；都不触发则持有到最后一个 mark(reason='end')。
 // 退出收益取触发 mark 的 pnl_pct(已扣往返)。maePct=持有期内相对入场价的最深回撤(%)。价格判定用 price_usd/entry。
 export function replayRule(marks, rule = {}) {
-  const pts = (marks || []).filter((m) => m.price_usd > 0);
+  // 撤池平仓标记 price=0 但语义是 −100%，必须保留(否则 rug 仓被当成末个正价 end 结束，规则统计系统性偏乐观)。
+  const pts = (marks || []).filter((m) => m.price_usd > 0 || m.price_state === 'withdrawn');
   if (!pts.length) return null;
   const entry = pts[0].price_usd;
   const openTs = pts[0].ts;
@@ -99,6 +100,8 @@ export function replayRule(marks, rule = {}) {
   let mae = 0;
   const finish = (m, reason) => ({ exitPnlPct: m.pnl_pct, exitReason: reason, maePct: mae, holdMin: (m.ts - openTs) / 60000 });
   for (const m of pts) {
+    // 撤池：先于所有规则，抽干即 −100% 退出(rug)。
+    if (m.price_state === 'withdrawn' || !(m.price_usd > 0)) return finish(m, 'rug');
     const p = m.price_usd;
     const ret = (p / entry - 1) * 100;
     if (ret < mae) mae = ret;
@@ -290,6 +293,20 @@ function quantile(a, q) {
 }
 
 export function paperStats(chain = null) {
+  const key = chain || '__all__';
+  const c = statsCache.get(key);
+  const now = Date.now();
+  if (c && now - c.at < STATS_TTL_MS) return c.val;
+  const val = computePaperStats(chain);
+  statsCache.set(key, { at: now, val });
+  return val;
+}
+
+// marks 表数天后可达数十万行，每 30s 全量重算 4 组会与轮询争 SQLite → 按 chain 缓存 60s。
+const statsCache = new Map();
+const STATS_TTL_MS = (cfg.statsCacheSec ?? 60) * 1000;
+
+function computePaperStats(chain = null) {
   const groups = ['baseline_seen', 'tier_t1', 'tier_t2', 'entry_pass'];
   const byGrp = {};
   for (const g of groups) byGrp[g] = { open: 0, closed: 0, deferred: 0, deferred_expired: 0, skipped: 0 };
@@ -318,7 +335,7 @@ export function paperStats(chain = null) {
     }
     // 分时桶累积 + 规则回放累积
     const bucketVals = Object.fromEntries(BUCKETS_MIN.map((b) => [b, []]));
-    const ruleOut = RULES.map((r) => ({ name: r.name, pnls: [], maes: [] }));
+    const ruleOut = RULES.map((r) => ({ name: r.name, pnls: [], maes: [], rug: 0, nClosed: 0, nOpen: 0 }));
     for (const pos of positions) {
       const marks = marksByPos.get(pos.id);
       if (!marks || !marks.length || !(pos.entry_price_usd > 0)) continue;
@@ -328,7 +345,11 @@ export function paperStats(chain = null) {
       for (const b of BUCKETS_MIN) if (br[b] != null) bucketVals[b].push(br[b]);
       RULES.forEach((rule, i) => {
         const res = replayRule(marks, rule);
-        if (res) { ruleOut[i].pnls.push(res.exitPnlPct); ruleOut[i].maes.push(res.maePct); }
+        if (!res) return;
+        ruleOut[i].pnls.push(res.exitPnlPct);
+        ruleOut[i].maes.push(res.maePct);
+        if (res.exitReason === 'rug') ruleOut[i].rug += 1;
+        if (isClosed) ruleOut[i].nClosed += 1; else ruleOut[i].nOpen += 1;
       });
     }
     const timeBuckets = {};
@@ -339,10 +360,13 @@ export function paperStats(chain = null) {
     const rules = ruleOut.map((r) => ({
       name: r.name,
       n: r.pnls.length,
+      nClosed: r.nClosed,
+      nOpen: r.nOpen,
       avgPnlPct: r.pnls.length ? avg(r.pnls) : null,
       medianPnlPct: r.pnls.length ? median(r.pnls) : null,
       winRate: r.pnls.length ? r.pnls.filter((v) => v > 0).length / r.pnls.length : null,
       avgMaePct: r.maes.length ? avg(r.maes) : null,
+      rugRate: r.pnls.length ? r.rug / r.pnls.length : null,
     }));
 
     out[g] = {

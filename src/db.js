@@ -585,7 +585,7 @@ const stmt = {
     WHERE grp=@grp AND (@chain IS NULL OR chain=@chain) AND open_ts IS NOT NULL`),
   // 某组全部 marks(join 仓位取 grp/chain)，按仓位+时间升序，调用方按 position_id 分组。
   paperMarksForGrp: db.prepare(`
-    SELECT m.position_id, m.ts, m.price_usd, m.pnl_pct
+    SELECT m.position_id, m.ts, m.price_usd, m.pnl_pct, m.price_state
     FROM paper_marks m JOIN paper_positions p ON p.id = m.position_id
     WHERE p.grp=@grp AND (@chain IS NULL OR p.chain=@chain)
     ORDER BY m.position_id, m.ts`),

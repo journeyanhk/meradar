@@ -140,3 +140,4 @@ body {
 .paper-sec-t:first-child { margin-top: 0; }
 .paper-rule-grp { margin-bottom: 10px; }
 .paper-rule-title { font-size: 12px; font-weight: 600; margin: 4px 0 2px; }
+.paper-n { color: var(--muted); font-weight: 400; font-size: 10px; margin-left: 2px; }

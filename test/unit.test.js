@@ -1698,6 +1698,14 @@ test('replayRule：全程不触发 → end（最后一个 mark）', () => {
   assert.equal(r.exitPnlPct, 3);
 });
 
+test('replayRule：+20% 后撤池 → 即刻 rug −100%(不被 tp/end 掩盖)', () => {
+  // 撤池平仓 mark: price=0 / pnl=-100 / price_state=withdrawn
+  const marks = [mk(0, 100, -2), mk(3, 120, 18), { ts: T0 + 5 * 60_000, price_usd: 0, pnl_pct: -100, price_state: 'withdrawn' }];
+  const r = replayRule(marks, { tp: 50, sl: 30, trail: 25 });
+  assert.equal(r.exitReason, 'rug', '撤池标记先于所有规则触发');
+  assert.equal(r.exitPnlPct, -100, 'rug 损失不得从规则统计消失');
+});
+
 test('bucketReturns：未平仓仓龄不足的桶为 null；取≤桶时刻最后一个 mark', () => {
   const marks = [mk(0, 100, -2), mk(5, 110, 10), mk(60, 150, 50)];
   const b = bucketReturns(marks, T0, 60 * 60_000, false, [5, 15, 60, 240]);
