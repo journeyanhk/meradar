@@ -239,6 +239,20 @@ CREATE TABLE IF NOT EXISTS paper_marks (
   price_state TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_paper_marks_pos ON paper_marks(position_id, ts);
+CREATE TABLE IF NOT EXISTS score_history (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  key         TEXT NOT NULL,
+  ts          INTEGER NOT NULL,
+  version     TEXT,
+  total       INTEGER,
+  s           INTEGER,
+  o           INTEGER,
+  capped      TEXT,
+  dims_json   TEXT,
+  vetoes_json TEXT,
+  gaps_json   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_score_hist_key ON score_history(key, ts);
 `);
 
 // 幂等迁移：node:sqlite 错误信息少，用 PRAGMA table_info 判断列是否存在再 ADD COLUMN，
@@ -290,6 +304,9 @@ ensureColumns('candidates', [
   ['locker', 'locker TEXT'],
   ['hook', 'hook TEXT'],
   ['fee_schedule', 'fee_schedule TEXT'],
+  // 序D 评分卡 v0：最新一次评分快照 JSON({version,S,O,total,capped,dims,vetoes,gaps,ts})。
+  // 只读展示/告警/撤离判定，不参与分级(evaluateTier)。历史轨迹另存 score_history。
+  ['score_json', 'score_json TEXT'],
 ]);
 // v4_pools 补列：max_liquidity_seen=历次读到的最大 activeLiquidity(bigint 存 TEXT)。
 // 撤池判定改为「曾有流动性(从有到无)」而非「tickSpacing≥200 且当前 tick 为 0」——后者在 Arc 单边发射池上必然误判
@@ -527,6 +544,11 @@ const stmt = {
   setBuyerFlags: db.prepare(`UPDATE candidates SET natural_buyers_30m=@natural_buyers_30m, soft_flags=@soft_flags, updated_at=@updated_at WHERE key=@key`),
   // 可试仓结果落库：不动 updated_at(避免每轮 entry 变化污染 active 排序/归档的 last-active 判定)。
   setEntry: db.prepare(`UPDATE candidates SET entry_json=@entry_json WHERE key=@key`),
+  // 序D 评分：最新分快照写回 candidates(不动 updated_at，同 setEntry 语义)；轨迹入 score_history。
+  setScore: db.prepare(`UPDATE candidates SET score_json=@score_json WHERE key=@key`),
+  insertScoreHistory: db.prepare(`INSERT INTO score_history (key, ts, version, total, s, o, capped, dims_json, vetoes_json, gaps_json) VALUES (@key, @ts, @version, @total, @s, @o, @capped, @dims_json, @vetoes_json, @gaps_json)`),
+  lastScoreHistory: db.prepare(`SELECT * FROM score_history WHERE key=? ORDER BY ts DESC LIMIT 1`),
+  deleteOldScoreHistory: db.prepare(`DELETE FROM score_history WHERE ts < ?`),
   // buyer_profiles：addBuyer 首次命中某(链,地址,新币) → 累计 total + 更新 first/last_seen。
   bumpBuyerProfile: db.prepare(`
     INSERT INTO buyer_profiles (chain, account, first_seen, last_seen, tokens_bought_total)
@@ -765,6 +787,30 @@ export const store = {
   setEntry(key, entry) {
     stmt.setEntry.run({ key, entry_json: entry ? JSON.stringify(entry) : null });
   },
+  // 序D：写最新分到 candidates + 追加一条 score_history。score 为 scoreToken() 返回对象(附 ts)。
+  saveScore(key, score, ts = Date.now()) {
+    const rec = { ...score, ts };
+    stmt.setScore.run({ key, score_json: JSON.stringify(rec) });
+    stmt.insertScoreHistory.run({
+      key, ts, version: score.version ?? null,
+      total: score.total ?? null, s: score.S ?? null, o: score.O ?? null,
+      capped: score.capped ?? null,
+      dims_json: score.dims ? JSON.stringify(score.dims) : null,
+      vetoes_json: score.vetoes ? JSON.stringify(score.vetoes) : null,
+      gaps_json: score.gaps ? JSON.stringify(score.gaps) : null,
+    });
+  },
+  lastScore(key) {
+    const row = stmt.lastScoreHistory.get(key);
+    if (!row) return null;
+    return {
+      version: row.version, total: row.total, S: row.s, O: row.o, capped: row.capped, ts: row.ts,
+      dims: row.dims_json ? JSON.parse(row.dims_json) : null,
+      vetoes: row.vetoes_json ? JSON.parse(row.vetoes_json) : [],
+      gaps: row.gaps_json ? JSON.parse(row.gaps_json) : [],
+    };
+  },
+  deleteOldScoreHistory(before) { return stmt.deleteOldScoreHistory.run(before).changes; },
   setBuyerTags(chain, account, tags, tokens24h, ts = Date.now()) {
     stmt.setBuyerTags.run({ chain, account: account.toLowerCase(), tags: tags && tags.length ? tags.join(',') : null, tokens24h: tokens24h | 0, ts });
   },

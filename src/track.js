@@ -4,10 +4,11 @@ import { shouldRetryMeta, nextMetaState } from './metaretry.js';
 import { scoreCandidate, evaluateTradeSafety } from './score.js';
 import { discoverPool, graduatedByCurve } from './pool.js';
 import { narrativeHit, copycatCount } from './narrative.js';
-import { maybeAlert, evaluateTier } from './alert.js';
+import { maybeAlert, evaluateTier, maybeExitAlert } from './alert.js';
 import { evaluateEntry } from './entry.js';
 import { shouldWriteSnapshot } from './snapshot.js';
 import { collectScoreInputs } from './scoreinputs.js';
+import { scoreToken, buildScoreInput } from './scorecard.js';
 import { store } from './db.js';
 import { config, chainConfig, entryFilterFor } from './config.js';
 import { httpClient } from './chain.js';
@@ -373,15 +374,31 @@ export async function pollCandidate(chain, cand) {
   if ((fresh?.entry_json ?? null) !== entryJson) store.setEntry(cand.key, entry);
   metrics.entry = entry;
 
+  // 序2+3：评分输入采集 + 评分卡 v0(只读，不参与分级)。在 maybeAlert 之前算好，供 T2 告警附分/撤离判定。
+  // 门槛：rawTier≥T2 或可试仓 PASS。落库策略——首评 / 距上条≥5min / 总分变动≥10 / 否决集合翻转
+  // → 追加一条 score_history + 刷新 candidates.score_json。用 fresh 行(数据同 finalRow，仅 tier 未定级)。
+  if (RANK[prelim.rawTier] >= RANK.T2 || metrics.entry?.ok) {
+    try { metrics.scoreInputs = await collectScoreInputs(chain, fresh, config.score?.inputs); }
+    catch (e) { log.debug({ err: e.message, key: cand.key }, '评分输入采集失败(忽略)'); }
+    try {
+      metrics.softFlags = softFlags;
+      const score = scoreToken(buildScoreInput(metrics));
+      const prevScore = store.lastScore(cand.key);
+      const vetoFlip = JSON.stringify(prevScore?.vetoes || []) !== JSON.stringify(score.vetoes || []);
+      const changed = !prevScore || vetoFlip
+        || Math.abs((prevScore.total ?? 0) - score.total) >= 10
+        || (now - (prevScore.ts ?? 0)) >= config.scoreHistoryIntervalMs;
+      if (changed) store.saveScore(cand.key, score, now);
+      metrics.score = score;
+    } catch (e) { log.debug({ err: e.message, key: cand.key }, '评分计算失败(忽略)'); }
+  }
+
   await maybeAlert(chain, fresh, metrics);
   // M4 纸面引擎：用本轮最终行(含 maybeAlert 落库的最新 tier) + metrics 开/标/平各分组模拟仓(只读)。
   const finalRow = store.get(cand.key);
-  // 序2：评分输入采集(只读)——仅 tier≥T2 或可试仓 PASS 时采集，控 RPC。挂进 metrics 供 scorecard(序3)消费。
   const finalTier = finalRow?.tier ?? cand.tier;
-  if (RANK[finalTier] >= RANK.T2 || metrics.entry?.ok) {
-    try { metrics.scoreInputs = await collectScoreInputs(chain, finalRow, config.score?.inputs); }
-    catch (e) { log.debug({ err: e.message, key: cand.key }, '评分输入采集失败(忽略)'); }
-  }
+  // 序D 撤离告警：用落级后的最新行判定(评分已在 maybeAlert 前算好挂在 metrics.score)。
+  if (metrics.score) { try { await maybeExitAlert(chain, finalRow, metrics, now); } catch (e) { log.debug({ err: e.message, key: cand.key }, '撤离告警失败(忽略)'); } }
   // snapshots 去重(写放大治理)：按最终 tier + 变化/心跳/事件判定是否落行。事件=tier 变化/entry 变化/撤池。
   // 用 prev(轮询开始的行)的 last_snapshot_* 作去重游标；prevBuyers 为上轮买家数。
   const snapEvent =

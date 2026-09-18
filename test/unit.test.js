@@ -1774,3 +1774,76 @@ test('isAllowed：空白名单一律拒绝(安全默认)', () => {
   // 依赖 config.telegram.allowedChatIds；测试环境未配置 → 空 → 全拒
   assert.equal(isAllowed('123'), false);
 });
+
+// —— 序D：评分卡 v0（冻结边界/否决封顶/未知→gap） —— //
+import { scoreToken, buildScoreInput, SCORE_VERSION } from '../src/scorecard.js';
+test('scoreToken：版本冻结为 v0', () => {
+  assert.equal(SCORE_VERSION, 'v0');
+  assert.equal(scoreToken({}).version, 'v0');
+});
+test('scoreToken：全空输入 → 全维度记「中(0.4)」，S/O 各 40，安全缺≥2 封顶70', () => {
+  const r = scoreToken({});
+  assert.equal(r.S, 40, '(0.4*50)/50*100=40');
+  assert.equal(r.O, 40);
+  // 0.6*40+0.4*40=40，未触封顶阈值(≤70)
+  assert.equal(r.total, 40);
+  assert.ok(r.gaps.length >= 2, '大量未知项进入 gaps');
+  assert.equal(r.capped, '安全缺≥2项·封顶70');
+});
+test('scoreToken：蜜罐 REJECT → 否决封顶30', () => {
+  const r = scoreToken({ safety: { state: 'REJECT' } });
+  assert.ok(r.vetoes.includes('蜜罐/已否决'));
+  assert.ok(r.total <= 30);
+  assert.equal(r.capped, '否决·封顶30');
+});
+test('scoreToken：卖税≥30% → 否决；卖税档位低优折算', () => {
+  assert.ok(scoreToken({ safety: { state: 'PASS', sellTaxBps: 3000 } }).vetoes.includes('卖税≥30%(蜜罐)'));
+  const mid = scoreToken({ safety: { state: 'PASS', sellTaxBps: 800 } });
+  assert.equal(mid.capped, '安全缺≥2项·封顶70', '仅卖税一项已核验，lp/proxy 仍未知→2 gap');
+});
+test('scoreToken：前10>50% 与 dev>20% 触发否决封顶30', () => {
+  assert.ok(scoreToken({ chips: { top10Pct: 60 } }).vetoes.includes('前10持仓>50%(极端集中)'));
+  assert.ok(scoreToken({ chips: { devPct: 25 } }).vetoes.includes('dev持仓>20%(单一地址过重)'));
+  assert.ok(scoreToken({ chips: { top10Pct: 60 } }).total <= 30);
+});
+test('scoreToken：部署者≥2次归零 → 否决；1次 → 中', () => {
+  assert.ok(scoreToken({ dev: { launches: 5, rugged: 2 } }).vetoes.includes('部署者跑路前科(≥2次归零)'));
+});
+test('scoreToken：满配优质币 → 无否决无 gap，高分', () => {
+  const r = scoreToken({
+    safety: { state: 'PASS', sellTaxBps: 0, lpLocked: true, proxyKnownSafe: true },
+    chips: { top10Pct: 15, devPct: 3, sniperBotRatio: 0.05, holderCount: 200 },
+    dev: { launches: 4, rugged: 0, devSold: 0 },
+    liq: { depthUsd: 40000, lpToMcapPct: 25, buyers1h: 200, buyRatio: 0.65, washFlag: false },
+    flow: { netIn30m: 6000, netIn1h: 9000, maxBuyPct: 10, drawdownPct: 20, ageMin: 30 },
+    community: { narrativeHits: 3, hasSocials: true },
+  });
+  assert.equal(r.vetoes.length, 0);
+  assert.equal(r.gaps.length, 0);
+  assert.equal(r.capped, null);
+  assert.ok(r.S >= 95 && r.O >= 95, `S=${r.S} O=${r.O} 应接近满分`);
+  assert.ok(r.total >= 95);
+});
+test('scoreToken：额外否决——池费率≥10%', () => {
+  const r = scoreToken({ safety: { state: 'PASS', sellTaxBps: 0, lpLocked: true, proxyKnownSafe: true }, poolFeePct: 10 });
+  assert.ok(r.vetoes.includes('池费率≥10%'));
+  assert.ok(r.total <= 30);
+});
+test('buildScoreInput：从 metrics 映射并计算 lpToMcap 与 sniperBot 比例', () => {
+  const inp = buildScoreInput({
+    chain: 'bsc', poolFeePct: 1,
+    tradeSafety: { state: 'PASS', source: 'factory', sellTaxBps: 0 },
+    depthUsd: 20000, marketCapUsd: 100000,
+    uniqueBuyers: 80, buyRatio: 0.55,
+    softFlags: { buyerCount: 100, sniper: 5, bot: 5 },
+    scoreInputs: { top10Pct: 30, devPct: 8, holders: 120, creator: { launches: 2, rugged: 0 } },
+    netIn30m: 3000, netIn1h: 5000,
+  });
+  assert.equal(inp.liq.lpToMcapPct, 20, '20000/100000*100');
+  assert.equal(inp.chips.sniperBotRatio, 0.1, '(5+5)/100');
+  assert.equal(inp.safety.factory, true);
+  // 端到端可评分
+  const r = scoreToken(inp);
+  assert.equal(r.version, 'v0');
+  assert.ok(r.total > 0);
+});

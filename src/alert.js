@@ -129,6 +129,45 @@ export async function maybeAlert(chain, cand, metrics) {
   return newTier;
 }
 
+// 序D 撤离告警：对当前 T2+ 或可试仓 PASS 的币，评分恶化(总分<45 / 安全分<50 / 命中否决)时提醒撤离。
+// 限速：同币 30 分钟一条；但「否决集合翻转」即时且不限速(不可逆风险优先)。仅告警不平仓(READ-ONLY)。
+const EXIT_RL_MS = 30 * 60_000;
+const exitAlertState = new Map(); // key -> { ts, vetoes:string }
+
+export async function maybeExitAlert(chain, cand, metrics, now = Date.now()) {
+  const s = metrics.score;
+  if (!s) return false;
+  const tier = cand.tier || 'T0';
+  if (RANK[tier] < RANK.T2 && !metrics.entry?.ok) return false;   // 只盯正在关注的币
+  const hasVeto = (s.vetoes?.length || 0) > 0;
+  const trigger = hasVeto || s.total < 45 || s.S < 50;
+  if (!trigger) return false;
+
+  const vetoesKey = hasVeto ? [...s.vetoes].sort().join('|') : '';
+  const prev = exitAlertState.get(cand.key);
+  const vetoFlip = hasVeto && (!prev || prev.vetoes !== vetoesKey);
+  if (!vetoFlip && prev && (now - prev.ts) < EXIT_RL_MS) return false;  // 非翻转则限速
+  exitAlertState.set(cand.key, { ts: now, vetoes: vetoesKey });
+
+  const why = hasVeto ? `否决:${s.vetoes.slice(0, 2).join('/')}`
+    : (s.S < 50 ? `安全分${s.S}偏低` : `总分${s.total}偏低`);
+  const chainTag = CHAIN_TAG[chain] || chain;
+  const links = linksFor(chain, cand);
+  const linkline = Object.entries(links).map(([k, v]) => `<a href="${v}">${k}</a>`).join(' · ');
+  const body = [
+    `🚨 <b>[${chainTag}][撤离] ${escape(cand.symbol || '')}</b>  ${escape(cand.name || '')}`,
+    `评分恶化：${why} · S${s.S}/O${s.O}/总${s.total}`,
+    `<code>${cand.address}</code>`,
+    linkline,
+  ].join('\n');
+  const tg = await sendTelegram(body, { silent: false });
+  const md = [`**${escape(cand.name || cand.symbol)}** (${escape(cand.symbol)})`, `- 🚨 撤离信号：${why}`, `- 评分 S${s.S}/O${s.O}/总${s.total}`, `- 合约: \`${cand.address}\``].join('\n');
+  const sc = await sendServerChan(`[${chainTag}][撤离] ${cand.symbol || ''} ${why}`, md);
+  store.addAlert({ key: cand.key, chain, tier: '撤离', ts: now, reason: why, sent_telegram: tg ? 1 : 0, sent_serverchan: sc ? 1 : 0 });
+  log.info({ token: cand.symbol, why, total: s.total, S: s.S, vetoFlip }, '撤离告警已发出');
+  return true;
+}
+
 // 安全行文案：PASS 显示卖税/模板已核验；WAIT 显示未核验；REJECT 显示否决因。
 function safetyLine(m) {
   const ts = m.tradeSafety;
@@ -168,6 +207,21 @@ function entryLine(m) {
   return `✅ 可试仓 ${e.tier} · 建议 ${usd(e.sizeUsd)}${e.auditVersion ? ` (${e.auditVersion})` : ''}`;
 }
 
+// 序D 评分行：S/O/总分 + 封顶标记 + 前两条扣分维度(按失分绝对值排序)。无评分则不出现。
+function scoreLine(m) {
+  const s = m.score;
+  if (!s) return null;
+  const tag = s.capped ? ` ⚠${s.capped}` : '';
+  const lost = Object.entries(s.dims || {})
+    .map(([name, d]) => ({ name, lost: d.max * (1 - d.frac) }))
+    .filter((x) => x.lost > 0.05)
+    .sort((a, b) => b.lost - a.lost)
+    .slice(0, 2)
+    .map((x) => `${x.name}-${x.lost.toFixed(1)}`);
+  const why = lost.length ? ` · 扣分:${lost.join('/')}` : '';
+  return `📊 评分 S${s.S}/O${s.O}/总${s.total}${tag}${why}`;
+}
+
 function renderBody(chain, cand, m, reason, links, tier) {
   const l = [];
   if (m.tradeSafety?.source === 'unverified') l.push('⚠ <b>未核验路径：v4 往返尚未实现</b>');
@@ -176,6 +230,8 @@ function renderBody(chain, cand, m, reason, links, tier) {
   l.push(reason);
   const entry = entryLine(m);
   if (entry) l.push(entry);
+  const score = scoreLine(m);
+  if (score) l.push(score);
   l.push(`<code>${cand.address}</code>`);
   const linkline = Object.entries(links).map(([k, v]) => `<a href="${v}">${k}</a>`).join(' · ');
   l.push(linkline);
@@ -190,6 +246,8 @@ function renderMarkdown(chain, cand, m, reason, links) {
   l.push(`- ${reason}`);
   const entry = entryLine(m);
   if (entry) l.push(`- ${entry}`);
+  const score = scoreLine(m);
+  if (score) l.push(`- ${score}`);
   l.push(`- 合约: \`${cand.address}\``);
   for (const [k, v] of Object.entries(links)) l.push(`- [${k}](${v})`);
   return l.join('\n');
