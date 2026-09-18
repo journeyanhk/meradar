@@ -143,7 +143,12 @@ function cardHtml(d) {
     </div>
     <div class="spark-holder"></div>
     <div class="addr">${esc(d.address)}</div>
-    <div class="links">${links}</div>`;
+    <div class="links">${links}</div>
+    <div class="card-actions" data-key="${esc(d.key)}">
+      <button data-act="manual" title="按当前价开一个 $100 手动模拟仓(只读追踪)">＋模拟</button>
+      <button data-act="watch" title="加入关注(只读追踪现值/MFE)">＋关注</button>
+      <button data-act="real" title="记录实盘持仓(输入数量)">＋实盘</button>
+    </div>`;
 }
 
 function upsert(d, highlight) {
@@ -347,10 +352,11 @@ async function loadPaper() {
         <td>${u.mfePct == null ? '—' : spct(u.mfePct)}</td>
         <td>${rk}</td>
         <td class="${u.ruleFiredReason || u.closeReason === 'withdrawn' ? 'neg' : ''}">${st}</td>
+        <td>${u.status === 'open' ? `<button class="mini" data-upact="rule" data-key="${esc(u.key)}" data-origin="${u.origin}">规则</button> <button class="mini" data-upact="close" data-key="${esc(u.key)}" data-origin="${u.origin}">平仓</button>` : ''}</td>
       </tr>`; }).join('');
     const userBlock = ups.length ? `
       <div class="paper-sec-t">我的仓位（手动/实盘/关注 · 只读追踪）</div>
-      <table class="paper-tbl"><thead><tr><th>类型</th><th>币</th><th>现值/结果</th><th>MFE</th><th>规则</th><th>状态</th></tr></thead><tbody>${upRows}</tbody></table>` : '';
+      <table class="paper-tbl"><thead><tr><th>类型</th><th>币</th><th>现值/结果</th><th>MFE</th><th>规则</th><th>状态</th><th>操作</th></tr></thead><tbody>${upRows}</tbody></table>` : '';
 
     body.innerHTML = `
       <div class="paper-sec-t">状态与已平仓</div>
@@ -364,6 +370,55 @@ async function loadPaper() {
       ${userBlock}`;
   } catch { body.textContent = '加载失败'; }
 }
-document.getElementById('paperBtn').addEventListener('click', () => { document.getElementById('paperOverlay').hidden = false; loadPaper(); });
-document.getElementById('paperClose').addEventListener('click', () => { document.getElementById('paperOverlay').hidden = true; });
-document.getElementById('paperOverlay').addEventListener('click', (e) => { if (e.target.id === 'paperOverlay') e.currentTarget.hidden = true; });
+// 序C：卡片仓位按钮(事件委托) —— 开手动/关注/实盘仓，只读追踪，绝不触发链上交易。
+async function apiPost(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || '请求失败');
+  return j;
+}
+feed.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.card-actions button');
+  if (!btn) return;
+  const key = btn.parentNode.dataset.key;
+  const act = btn.dataset.act;
+  try {
+    const body = { key, origin: act };
+    if (act === 'real') {
+      const qty = prompt('实盘持仓数量（代币个数）：');
+      if (qty == null) return;
+      if (!(Number(qty) > 0)) { toast('数量无效'); return; }
+      body.qty = Number(qty);
+    }
+    await apiPost('/api/paper/position', body);
+    const L = { manual: '手动模拟', watch: '关注', real: '实盘' }[act] || act;
+    toast(`已加入「${L}」仓位 · 打开纸面引擎查看`);
+  } catch (err) { toast(err.message); }
+});
+function toast(msg) {
+  let t = document.getElementById('toast');
+  if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
+  t.textContent = msg; t.className = 'show';
+  clearTimeout(toast._t); toast._t = setTimeout(() => { t.className = ''; }, 3000);
+}
+document.getElementById('paperBtn').addEventListener('click', () => { document.getElementById('paperOverlay').hidden = false; loadPaper(); });document.getElementById('paperClose').addEventListener('click', () => { document.getElementById('paperOverlay').hidden = true; });
+// 序C：面板「我的仓位」操作(平仓/绑定规则)
+document.getElementById('paperBody').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-upact]');
+  if (!btn) return;
+  const { upact, key, origin } = btn.dataset;
+  try {
+    if (upact === 'close') {
+      if (!confirm('确认平仓该仓位？(只读记录，不影响链上)')) return;
+      await apiPost('/api/paper/position/close', { key, origin });
+      toast('已平仓');
+    } else if (upact === 'rule') {
+      const s = prompt('设置退出规则（tp,sl,trail,持有分钟，留空即不启用）\n例：50,30,25,240 表示 止盈50%/止损30%/追踪25%/最长4h');
+      if (s == null) return;
+      const [tp, sl, trail, maxHoldMin] = s.split(',').map((x) => x.trim());
+      await apiPost('/api/paper/position/rule', { key, origin, rule: { tp, sl, trail, maxHoldMin } });
+      toast('规则已绑定');
+    }
+    loadPaper();
+  } catch (err) { toast(err.message); }
+});document.getElementById('paperOverlay').addEventListener('click', (e) => { if (e.target.id === 'paperOverlay') e.currentTarget.hidden = true; });

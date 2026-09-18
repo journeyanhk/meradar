@@ -3,14 +3,14 @@ import { child } from '../logger.js';
 
 const log = child('telegram');
 
-export async function sendTelegram(text, { silent = false } = {}) {
+export async function sendTelegram(text, { silent = false, chatId = null } = {}) {
   if (!config.telegram.enabled) return false;
   try {
     const res = await fetch(`https://api.telegram.org/bot${config.telegram.token}/sendMessage`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        chat_id: config.telegram.chatId,
+        chat_id: chatId || config.telegram.chatId,
         text,
         parse_mode: 'HTML',
         disable_web_page_preview: true,

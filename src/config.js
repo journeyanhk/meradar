@@ -44,6 +44,11 @@ export const config = {
     token: env('TELEGRAM_BOT_TOKEN'),
     chatId: env('TELEGRAM_CHAT_ID'),
     enabled: Boolean(env('TELEGRAM_BOT_TOKEN') && env('TELEGRAM_CHAT_ID')),
+    // 序C：入站命令(getUpdates 长轮询)。默认关闭，需显式 TELEGRAM_COMMANDS=1 开启。
+    commands: env('TELEGRAM_COMMANDS') === '1' || env('TELEGRAM_COMMANDS') === 'true',
+    // 白名单 chat_id(逗号分隔)；缺省用推送目标 chatId 自身。只有白名单内的会话能改仓位。
+    allowedChatIds: (env('TELEGRAM_ALLOWED_CHAT_IDS') || env('TELEGRAM_CHAT_ID') || '')
+      .split(',').map((s) => s.trim()).filter(Boolean),
   },
   serverchan: {
     sendkey: env('SERVERCHAN_SENDKEY'),

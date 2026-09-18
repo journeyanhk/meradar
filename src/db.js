@@ -339,6 +339,7 @@ const stmt = {
     ON CONFLICT(key) DO NOTHING
   `),
   getCandidate: db.prepare(`SELECT * FROM candidates WHERE key = ?`),
+  candidatesByAddress: db.prepare(`SELECT * FROM candidates WHERE address = ? COLLATE NOCASE ORDER BY updated_at DESC`),
   updateEnrich: db.prepare(`
     UPDATE candidates SET name=@name, symbol=@symbol, decimals=@decimals, total_supply=@total_supply,
       creator=@creator, updated_at=@updated_at WHERE key=@key
@@ -631,6 +632,7 @@ export const store = {
   raw: db,
   addCandidate(c) { return stmt.upsertCandidate.run({ launch_time: null, ...c }).changes > 0; },
   get(key) { return stmt.getCandidate.get(key); },
+  candidatesByAddress(addr) { return stmt.candidatesByAddress.all(addr); },
   enrich(key, data) { stmt.updateEnrich.run({ key, updated_at: Date.now(), ...data }); },
   setPool(key, pool, pool_type, quote) { stmt.setPool.run({ key, pool, pool_type, quote, updated_at: Date.now() }); },
   setCurveInfo(key, { quote_symbol = null, max_raising = null, launch_time = null }) {

@@ -2,6 +2,7 @@ import { config, chainConfig } from './config.js';
 import { startServer } from './server.js';
 import { startEngine, backfillRecentCreates } from './engine.js';
 import { startPaper } from './paper.js';
+import { startTelegramCommands } from './telegram-commands.js';
 import { logsClient, measureSecPerBlock } from './chain.js';
 import { refreshBnbUsd, getBnbUsd, refreshNativeUsd, getNativeUsd, hasLiveNativeUsd } from './enrich.js';
 import { refreshDynamicQuotes } from './quotePrice.js';
@@ -124,6 +125,7 @@ async function main() {
 
   startEngine();
   startPaper();
+  startTelegramCommands();
 }
 
 main().catch((e) => {

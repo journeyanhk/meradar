@@ -1759,3 +1759,18 @@ test('sanitizeRule：过滤非正数与全空，规范化字段', () => {
   assert.equal(sanitizeRule(null), null);
   assert.deepEqual(sanitizeRule({ trail: 25 }), { tp: null, sl: null, trail: 25, maxHoldMin: null });
 });
+
+// —— 序C：Telegram 命令解析(纯函数) —— //
+import { parseCommand, isAllowed } from '../src/telegram-commands.js';
+test('parseCommand：/cmd@bot 与参数解析', () => {
+  assert.deepEqual(parseCommand('/buy 0xabc'), { cmd: 'buy', args: ['0xabc'] });
+  assert.deepEqual(parseCommand('/real@meradar_bot 0xabc 1000'), { cmd: 'real', args: ['0xabc', '1000'] });
+  assert.deepEqual(parseCommand('/list'), { cmd: 'list', args: [] });
+  assert.deepEqual(parseCommand('  /rule 0xabc 50,30,25,240 '), { cmd: 'rule', args: ['0xabc', '50,30,25,240'] });
+  assert.equal(parseCommand('hello'), null, '非命令 → null');
+  assert.equal(parseCommand(''), null);
+});
+test('isAllowed：空白名单一律拒绝(安全默认)', () => {
+  // 依赖 config.telegram.allowedChatIds；测试环境未配置 → 空 → 全拒
+  assert.equal(isAllowed('123'), false);
+});
